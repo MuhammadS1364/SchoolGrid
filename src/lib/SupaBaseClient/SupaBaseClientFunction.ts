@@ -100,6 +100,63 @@ export async function checkGoogleProviderEnabled(): Promise<{
   }
 }
 
+const inFlightCodeExchanges = new Map<string, Promise<{ error: unknown | null }>>();
+const completedCodes = new Set<string>();
+
+/**
+ * Exchanges an OAuth PKCE ?code= at most once across StrictMode double-mounts
+ * and concurrent AuthContext / AuthCallback effects, preventing the
+ * "PKCE code verifier not found in storage" double-consumption error.
+ */
+export async function exchangeAuthCodeOnce(
+  supabase: SupabaseClient,
+  code: string
+): Promise<{ error: unknown | null }> {
+  const trimmed = code.trim();
+  if (!trimmed) return { error: null };
+
+  if (completedCodes.has(trimmed)) {
+    return { error: null };
+  }
+
+  const existingPromise = inFlightCodeExchanges.get(trimmed);
+  if (existingPromise) {
+    return existingPromise;
+  }
+
+  const run = (async () => {
+    try {
+      // If a session is already established for this browser, don't re-consume a spent code
+      const { data: existingSession } = await supabase.auth.getSession();
+      if (existingSession?.session && completedCodes.has(trimmed)) {
+        return { error: null };
+      }
+
+      if (typeof supabase.auth.exchangeCodeForSession !== 'function') {
+        return { error: null };
+      }
+
+      const { error } = await supabase.auth.exchangeCodeForSession(trimmed);
+      if (!error) {
+        completedCodes.add(trimmed);
+      } else {
+        // If another tab/effect already exchanged the code into storage, check session before failing
+        const { data: postCheck } = await supabase.auth.getSession();
+        if (postCheck?.session) {
+          completedCodes.add(trimmed);
+          return { error: null };
+        }
+      }
+      return { error: error ?? null };
+    } finally {
+      inFlightCodeExchanges.delete(trimmed);
+    }
+  })();
+
+  inFlightCodeExchanges.set(trimmed, run);
+  return run;
+}
+
 export const SupaBaseClientFunction = (): SupabaseClient => {
   const mode: 'mock' | 'live' = isUsingMockSupabase() ? 'mock' : 'live';
   if (!cachedClient || cachedMode !== mode) {
@@ -111,7 +168,9 @@ export const SupaBaseClientFunction = (): SupabaseClient => {
         auth: {
           persistSession: true,
           autoRefreshToken: true,
-          detectSessionInUrl: true,
+          // Explicit callback handling in AuthCallback.tsx & AuthContext.tsx via exchangeAuthCodeOnce
+          // prevents double PKCE exchange ("PKCE code verifier not found in storage").
+          detectSessionInUrl: false,
           flowType: 'pkce',
           storageKey: 'schoolgrid-auth-session',
         },

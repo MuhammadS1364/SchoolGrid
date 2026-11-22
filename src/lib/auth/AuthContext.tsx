@@ -10,6 +10,7 @@ import { useNavigate } from 'react-router-dom';
 import type { Session, User } from '@supabase/supabase-js';
 import {
   SupaBaseClientFunction,
+  exchangeAuthCodeOnce,
   formatSupabaseError,
   parseOAuthUrlParams,
 } from '../SupaBaseClient/SupaBaseClientFunction';
@@ -144,9 +145,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             if (active) setIsRecoveryMode(true);
           }
 
-          if (parsed.code && typeof supabase.auth.exchangeCodeForSession === 'function') {
+          if (parsed.code) {
             handledIncomingOAuth = true;
-            const { error: exchangeErr } = await supabase.auth.exchangeCodeForSession(parsed.code);
+            const { error: exchangeErr } = await exchangeAuthCodeOnce(supabase, parsed.code);
             if (exchangeErr && active) {
               setAuthError(formatSupabaseError(exchangeErr, 'Could not complete sign-in session.'));
             }

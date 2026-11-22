@@ -5,6 +5,7 @@ import { ArrowLeft, ArrowRight, KeyRound, LogOut, MailCheck, UserCheck } from 'l
 import {
   SupaBaseClientFunction,
   checkGoogleProviderEnabled,
+  exchangeAuthCodeOnce,
   formatSupabaseError,
   isUsingMockSupabase,
 } from '../lib/SupaBaseClient/SupaBaseClientFunction';
@@ -78,10 +79,8 @@ export const GetWay: FC = () => {
         setError(null);
         try {
           const supabase = SupaBaseClientFunction();
-          if (typeof supabase.auth.exchangeCodeForSession === 'function') {
-            const { error: exchangeErr } = await supabase.auth.exchangeCodeForSession(data.code);
-            if (exchangeErr) throw exchangeErr;
-          }
+          const { error: exchangeErr } = await exchangeAuthCodeOnce(supabase, data.code);
+          if (exchangeErr) throw exchangeErr;
           const { session: updatedSession, access: refreshedAccess } = await refreshSession();
           const u = updatedSession?.user;
           if (!u) {

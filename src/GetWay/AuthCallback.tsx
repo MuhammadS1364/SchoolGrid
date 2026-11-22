@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Loader2, ShieldAlert } from 'lucide-react';
 import SupaBaseClientFunction, {
+  exchangeAuthCodeOnce,
   formatSupabaseError,
   parseOAuthUrlParams,
 } from '../lib/SupaBaseClient/SupaBaseClientFunction';
@@ -54,10 +55,18 @@ export default function AuthCallback() {
           }
         }
 
-        // Top-level browser flow (mobile Chrome, direct tab, or fallback)
-        if (parsed.code && typeof supabase.auth.exchangeCodeForSession === 'function') {
-          const { error: exchangeErr } = await supabase.auth.exchangeCodeForSession(parsed.code);
-          if (exchangeErr) throw exchangeErr;
+        // Top-level browser flow (Vercel, mobile Chrome, direct tab)
+        if (parsed.code) {
+          const { error: exchangeErr } = await exchangeAuthCodeOnce(supabase, parsed.code);
+          if (exchangeErr) {
+            const rawMsg = formatSupabaseError(exchangeErr, 'Could not exchange Google login code.');
+            if (rawMsg.toLowerCase().includes('code verifier')) {
+              throw new Error(
+                `PKCE verification failed for ${window.location.origin}. Make sure you start Google Sign-In on the exact same domain configured in Supabase (Authentication → URL Configuration → Site URL & Redirect URLs: ${window.location.origin}/auth/callback) and try again.`
+              );
+            }
+            throw exchangeErr;
+          }
         } else if (parsed.accessToken && parsed.refreshToken) {
           const { error: sessionErr } = await supabase.auth.setSession({
             access_token: parsed.accessToken,
