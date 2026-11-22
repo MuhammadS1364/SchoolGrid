@@ -1,0 +1,1549 @@
+SCHOOL PLATFORM COMPLETE DATABASE TABLES, RELATIONSHIPS, SECURITY &
+SERVICE BLUEPRINT File: tables.txt Version: 1.0 Database: Turso (SQLite
+/ libSQL) Authentication: Supabase Auth File storage: Each school’s
+connected Google Drive Application: Multi-tenant school activity and
+public website platform
+
+======================================================================
+0. PURPOSE AND ARCHITECTURE
+======================================================================
+
+This document defines the database blueprint for a multi-school
+platform. One platform serves many independent schools. Each school
+receives a subdomain and its own public website and administration
+dashboard.
+
+The platform is focused on: - School identity and public information -
+Wings, departments, teams and activities - Students, staff and school
+memberships - Programmes, events, registrations and participation -
+Achievements, news, notices and galleries - Documents and media
+metadata - School-specific Google Drive connections - Roles, permissions
+and audit history - Platform-wide school onboarding and management
+
+It is NOT initially an examination, marksheet, fee, attendance or LMS
+system. Those can be added later as separate modules.
+
+IMPORTANT SEPARATION: 1. Supabase Auth authenticates a person and issues
+a JWT. 2. Turso stores the platform’s application records and
+authorization data. 3. Google Drive stores file binaries. Turso stores
+only file metadata and secure references. 4. The backend verifies the
+JWT, resolves the tenant, checks account status, membership, role,
+permission and resource scope before every protected operation. 5. The
+frontend is never trusted to decide a user’s role or school access.
+
+Turso is shared by all schools. This is a shared-database, shared-schema
+multi-tenant architecture. Every school-owned record must be scoped to a
+school_id, either directly or through a parent record with a validated
+composite foreign key.
+
+Use TEXT UUIDs for IDs. Generate UUIDs in the application using a
+cryptographically secure UUID implementation. Store timestamps in UTC as
+ISO-8601 TEXT, for example 2026-11-21T10:30:00.000Z. Use INTEGER 0/1 for
+booleans. Use INTEGER for counts and minor currency units where
+applicable. Use TEXT for flexible JSON only when necessary; validate
+JSON shape in application code.
+
+Enable PRAGMA foreign_keys = ON on EVERY database connection. Use
+parameterized SQL only. Never concatenate user input into SQL. Use
+migrations; never edit production schema manually. Use explicit
+transactions for multi-row operations within Turso.
+
+====================================================================== 1.
+GLOBAL DATABASE CONVENTIONS
+======================================================================
+
+1.1 Standard columns
+
+Where relevant, tables should include: - id TEXT PRIMARY KEY -
+created_at TEXT NOT NULL - updated_at TEXT NOT NULL - created_by TEXT
+NULL - updated_by TEXT NULL
+
+Do not blindly add every standard column to every table. For immutable
+event records, use created_at and actor_id. For join tables, a composite
+primary key may be better than a separate id.
+
+1.2 Naming
+
+-   Tables: plural snake_case, e.g. school_memberships
+-   Columns: snake_case, e.g. school_id
+-   IDs: TEXT UUID
+-   Boolean: INTEGER with CHECK (column IN (0,1))
+-   Status: TEXT with CHECK constraints for allowed values
+-   Timestamps: UTC ISO-8601 TEXT
+-   Permission keys: lowercase dot notation, e.g. programmes.publish
+
+1.3 Common status values
+
+Use a CHECK constraint for each table’s own valid status list. Do not
+use one unrestricted status field everywhere.
+
+Typical values: - schools: pending, active, suspended, archived -
+onboarding: pending, approved, rejected, cancelled - invitations:
+pending, accepted, expired, revoked - content: draft, published,
+archived - files: pending, active, quarantined, deleted, failed - jobs:
+pending, processing, completed, failed, cancelled
+
+1.4 Tenant isolation
+
+For every school-owned entity: - Include school_id directly whenever
+practical. - Query with WHERE school_id = validated_school_id. - Add
+indexes beginning with school_id for tenant-scoped queries. - Use
+composite foreign keys where a child references a parent in the same
+school. - Do not accept school_id as an authority from a browser
+request. Resolve it from the verified hostname and validated
+membership. - Never expose another school’s records by guessing IDs.
+
+For example, programmes should have UNIQUE(school_id, id). A programme
+registration should reference (school_id, programme_id), not
+programme_id alone. This prevents a row belonging to School A from
+referencing a programme belonging to School B.
+
+1.5 Deletion policy
+
+Prefer archive/soft-delete for schools, users, students, staff,
+programmes, news and other records with historical value. Hard-delete
+only temporary records, expired tokens, or data that policy explicitly
+allows to erase. A school suspension must not delete its data. A school
+archive must not erase audit history or billing/legal records. A user’s
+account deactivation must revoke access without destroying historical
+participation records.
+
+1.6 Sensitive data
+
+Never store: - Supabase passwords - Plain invitation tokens - Plain
+Google refresh tokens - Google client secrets - JWT signing secrets -
+Encryption keys - Full payment card data
+
+Store invitation token hashes, not raw tokens. Store Google credential
+secret references, not raw credentials. Keep encryption keys in a
+managed secrets service/environment, not Turso. Do not put secrets in
+logs, error messages, frontend bundles or analytics.
+
+======================================================================
+2. PLATFORM IDENTITY AND SCHOOL TENANCY TABLES
+======================================================================
+
+TABLE 01: users Purpose: One application-level person record mapped to
+Supabase Auth.
+
+Columns: - id TEXT PRIMARY KEY - supabase_uid TEXT NOT NULL UNIQUE -
+email TEXT NULL - email_normalized TEXT NULL - display_name TEXT NULL -
+phone TEXT NULL - avatar_file_id TEXT NULL - account_status TEXT NOT
+NULL DEFAULT ‘active’ CHECK active, disabled, locked, pending -
+email_verified_at TEXT NULL - last_login_at TEXT NULL - created_at TEXT
+NOT NULL - updated_at TEXT NOT NULL - deactivated_at TEXT NULL
+
+Rules: - supabase_uid is the immutable Supabase Auth user UUID. - Email
+is profile/contact data, not the primary identity key. - Normalize email
+in backend before storing. - Do not use email alone to join
+identities. - Account disabled/locked blocks platform and school
+access. - Supabase Auth user creation does not automatically grant
+school roles.
+
+Created: When a verified Supabase identity is first provisioned or
+synchronized.
+
+Updated: When approved profile fields change, email changes, account
+state changes, or last login is recorded. Avoid updating last_login_at
+on every API call.
+
+TABLE 02: schools Purpose: One tenant/school record.
+
+Columns: - id TEXT PRIMARY KEY - name TEXT NOT NULL - slug TEXT NOT NULL
+UNIQUE - legal_name TEXT NULL - short_name TEXT NULL - description TEXT
+NULL - logo_file_id TEXT NULL - favicon_file_id TEXT NULL -
+contact_email TEXT NULL - contact_phone TEXT NULL - website_url TEXT
+NULL - address_line_1 TEXT NULL - address_line_2 TEXT NULL - city TEXT
+NULL - district TEXT NULL - state TEXT NULL - country_code TEXT NULL -
+postal_code TEXT NULL - timezone TEXT NOT NULL DEFAULT ‘Asia/Kolkata’ -
+default_language TEXT NOT NULL DEFAULT ‘en’ - status TEXT NOT NULL CHECK
+pending, active, suspended, archived - subdomain_verified INTEGER NOT
+NULL DEFAULT 0 - onboarding_request_id TEXT NULL - created_at TEXT NOT
+NULL - updated_at TEXT NOT NULL - activated_at TEXT NULL - suspended_at
+TEXT NULL - archived_at TEXT NULL - created_by TEXT NULL
+
+Rules: - slug is unique and used for {slug}.platform-domain.example. -
+Validate slug against a strict allowlist, length and reserved words. -
+Do not permit reserved slugs such as www, admin, api, platform, auth. -
+School status must be active before normal school users can use its
+protected dashboard. - Suspended school public visibility is a policy
+setting; protected dashboard access must be blocked. - Do not physically
+delete a school as a normal operation.
+
+Created: Only by the school provisioning service after SuperAdmin
+creation or approval of an onboarding request.
+
+Updated: School Admin can update permitted profile fields. SuperAdmin
+can update platform-controlled fields/status. Every sensitive change is
+audited.
+
+TABLE 03: platform_roles Purpose: Platform-level roles, independent of
+school roles.
+
+Columns: - id TEXT PRIMARY KEY - key TEXT NOT NULL UNIQUE - name TEXT
+NOT NULL - description TEXT NULL - is_system INTEGER NOT NULL DEFAULT
+0 - created_at TEXT NOT NULL
+
+Initial roles: - super_admin - platform_support - platform_auditor
+
+Security: A platform role is never a school role. A school administrator
+cannot assign platform roles. SuperAdmin assignment must use a
+protected, audited administrative workflow. No public registration may
+create a SuperAdmin.
+
+TABLE 04: platform_permissions Purpose: Catalogue of platform-level
+permissions.
+
+Columns: - id TEXT PRIMARY KEY - permission_key TEXT NOT NULL UNIQUE -
+description TEXT NOT NULL - created_at TEXT NOT NULL
+
+Examples: - platform.schools.create - platform.schools.view -
+platform.schools.update - platform.schools.suspend -
+platform.schools.archive - platform.onboarding.view -
+platform.onboarding.approve - platform.onboarding.reject -
+platform.users.view - platform.users.disable - platform.audit.view -
+platform.storage.overview - platform.settings.manage
+
+TABLE 05: platform_role_permissions Purpose: Connect platform roles to
+platform permissions.
+
+Columns: - platform_role_id TEXT NOT NULL - permission_id TEXT NOT
+NULL - created_at TEXT NOT NULL PRIMARY KEY(platform_role_id,
+permission_id) Foreign keys to platform_roles and platform_permissions.
+
+TABLE 06: platform_user_roles Purpose: Assign a platform role to an
+application user.
+
+Columns: - user_id TEXT NOT NULL - platform_role_id TEXT NOT NULL -
+assigned_by TEXT NULL - assigned_at TEXT NOT NULL - revoked_at TEXT NULL
+PRIMARY KEY(user_id, platform_role_id) Foreign keys to users and
+platform_roles.
+
+Rules: - Only an authorized SuperAdmin can assign/revoke platform
+roles. - Revocation is recorded; do not silently erase historical
+evidence. - Enforce MFA for SuperAdmin accounts in the authentication
+policy. - Require recent re-authentication for high-risk platform
+operations.
+
+TABLE 07: school_memberships Purpose: Connect a user to a school. One
+user may belong to many schools.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - user_id TEXT
+NOT NULL - membership_status TEXT NOT NULL CHECK invited, active,
+suspended, revoked - joined_at TEXT NULL - invited_by TEXT NULL -
+created_at TEXT NOT NULL - updated_at TEXT NOT NULL - UNIQUE(school_id,
+user_id) - UNIQUE(school_id, id) Foreign keys: - school_id ->
+schools.id - user_id -> users.id
+
+Rules: - A user may have one membership per school. - A user can have
+different roles in different schools. - Suspended/revoked membership
+blocks access to that school only. - Do not infer membership from email
+domain.
+
+TABLE 08: school_roles Purpose: Roles defined for a school.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - role_key TEXT
+NOT NULL - name TEXT NOT NULL - description TEXT NULL - is_system
+INTEGER NOT NULL DEFAULT 0 - is_active INTEGER NOT NULL DEFAULT 1 -
+created_at TEXT NOT NULL - updated_at TEXT NOT NULL - UNIQUE(school_id,
+role_key) - UNIQUE(school_id, id) Foreign key school_id -> schools.id
+
+Default school roles: - school_admin - wing_manager - teacher -
+content_manager - student
+
+Rules: - A role is scoped to one school. - Do not create a global
+school_admin role that grants access to every tenant. - System roles may
+be protected from deletion; permission changes should be audited. -
+Custom roles can be added later if required.
+
+TABLE 09: permissions Purpose: School-level permission catalogue.
+
+Columns: - id TEXT PRIMARY KEY - permission_key TEXT NOT NULL UNIQUE -
+module TEXT NOT NULL - action TEXT NOT NULL - description TEXT NOT
+NULL - created_at TEXT NOT NULL
+
+Examples: - school.profile.view - school.profile.update -
+students.view/create/update/archive - staff.view/create/update/archive -
+wings.view/create/update/archive -
+programmes.view/create/update/publish/archive -
+registrations.view/create/cancel -
+achievements.view/create/update/publish -
+news.view/create/update/publish - notices.view/create/update/publish -
+gallery.view/create/update/publish - files.view/upload/delete -
+memberships.invite/view/update/revoke - roles.view/manage -
+storage.connect/manage - reports.view/export - audit.view
+
+Use one row per exact permission key. Avoid broad wildcard permissions
+unless the authorization engine explicitly and safely defines them.
+
+TABLE 10: role_permissions Purpose: Connect a school role to
+permissions.
+
+Columns: - school_id TEXT NOT NULL - role_id TEXT NOT NULL -
+permission_id TEXT NOT NULL - granted_at TEXT NOT NULL - granted_by TEXT
+NULL PRIMARY KEY(school_id, role_id, permission_id) Foreign keys: -
+(school_id, role_id) -> school_roles(school_id, id) - permission_id ->
+permissions.id
+
+Rules: - Permission catalogue rows are global definitions; assignments
+are school-scoped. - Default-deny: missing permission means denied. -
+Permission updates must invalidate authorization caches. - Do not trust
+permissions sent by the client.
+
+TABLE 11: membership_roles Purpose: A membership can have multiple roles
+within the same school.
+
+Columns: - school_id TEXT NOT NULL - membership_id TEXT NOT NULL -
+role_id TEXT NOT NULL - assigned_by TEXT NULL - assigned_at TEXT NOT
+NULL - revoked_at TEXT NULL PRIMARY KEY(school_id, membership_id,
+role_id) Foreign keys: - (school_id, membership_id) ->
+school_memberships(school_id, id) - (school_id, role_id) ->
+school_roles(school_id, id)
+
+Rules: - Enforce same-school role assignment with composite foreign
+keys. - A user can be Teacher and Content Manager in the same school. -
+Revocation must be auditable.
+
+TABLE 12: school_invitations Purpose: Secure invitation workflow for
+staff, managers and students.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL -
+email_normalized TEXT NOT NULL - intended_user_id TEXT NULL -
+membership_id TEXT NULL - invited_by TEXT NOT NULL - token_hash TEXT NOT
+NULL UNIQUE - invitation_status TEXT NOT NULL CHECK pending, accepted,
+expired, revoked - expires_at TEXT NOT NULL - accepted_at TEXT NULL -
+revoked_at TEXT NULL - created_at TEXT NOT NULL - updated_at TEXT NOT
+NULL Foreign keys: - school_id -> schools.id - intended_user_id ->
+users.id - (school_id, membership_id) -> school_memberships(school_id,
+id)
+
+Rules: - Generate a cryptographically random token; send raw token only
+once. - Store only a strong hash of the token. - Single-use,
+expiry-bound, school-bound invitation. - On accept: verify hash, expiry,
+status, intended email and school status. - Create/find user identity,
+create membership and assign allowed roles in a transaction where
+possible. - Do not let the invitee choose SuperAdmin or arbitrary
+roles. - Rate-limit invite creation and acceptance. - Revoke old
+invitations when a replacement is issued.
+
+TABLE 13: school_onboarding_requests Purpose: Public requests from
+schools seeking registration.
+
+Columns: - id TEXT PRIMARY KEY - requested_school_name TEXT NOT NULL -
+requested_slug TEXT NOT NULL - contact_person TEXT NOT NULL -
+contact_email TEXT NOT NULL - contact_phone TEXT NULL - city TEXT NULL -
+state TEXT NULL - country_code TEXT NULL - message TEXT NULL -
+request_status TEXT NOT NULL CHECK pending, under_review, approved,
+rejected, cancelled - reviewed_by TEXT NULL - reviewed_at TEXT NULL -
+review_note TEXT NULL - created_school_id TEXT NULL - created_at TEXT
+NOT NULL - updated_at TEXT NOT NULL Foreign keys: - reviewed_by ->
+users.id - created_school_id -> schools.id
+
+Rules: - Public users may submit a request but cannot create an active
+school. - Validate and normalize requested_slug. - Prevent duplicate
+pending requests for the same slug/email where appropriate. - Approval
+requires platform.schools.create/approval permission. - Rejection reason
+should be recorded without exposing internal notes publicly. -
+Rate-limit and protect public submission with abuse prevention.
+
+TABLE 14: school_settings Purpose: School-specific configuration.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL UNIQUE -
+public_site_enabled INTEGER NOT NULL DEFAULT 1 - student_portal_enabled
+INTEGER NOT NULL DEFAULT 1 - default_language TEXT NOT NULL DEFAULT
+‘en’ - timezone TEXT NOT NULL DEFAULT ‘Asia/Kolkata’ - date_format TEXT
+NOT NULL DEFAULT ‘DD MMM YYYY’ - contact_visibility TEXT NOT NULL
+DEFAULT ‘public’ - registration_mode TEXT NOT NULL DEFAULT
+‘invitation’ - max_upload_size_bytes INTEGER NOT NULL DEFAULT 10485760 -
+allowed_file_types_json TEXT NOT NULL - settings_json TEXT NOT NULL
+DEFAULT ‘{}’ - created_at TEXT NOT NULL - updated_at TEXT NOT NULL
+Foreign key school_id -> schools.id
+
+Rules: - Validate settings_json against a strict schema. - Do not put
+secrets in settings_json. - Public settings must be explicitly selected;
+never expose private configuration wholesale.
+
+======================================================================
+3. SCHOOL ORGANISATION TABLES
+======================================================================
+
+TABLE 15: school_years Purpose: Optional academic/administrative year
+labels for grouping activities. Not an examination or attendance system.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - name TEXT NOT
+NULL - starts_on TEXT NULL - ends_on TEXT NULL - is_current INTEGER NOT
+NULL DEFAULT 0 - status TEXT NOT NULL CHECK active, closed, archived -
+created_at TEXT NOT NULL - updated_at TEXT NOT NULL - UNIQUE(school_id,
+id) - UNIQUE(school_id, name) Foreign key school_id -> schools.id
+
+Rules: - At most one current year per school. Enforce in application
+transaction and, if supported by migration design, a partial unique
+index. - Closing a year does not delete activities or student history.
+
+TABLE 16: school_classes Purpose: School class/grade/level catalogue.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - name TEXT NOT
+NULL - sort_order INTEGER NOT NULL DEFAULT 0 - is_active INTEGER NOT
+NULL DEFAULT 1 - created_at TEXT NOT NULL - updated_at TEXT NOT NULL -
+UNIQUE(school_id, id) - UNIQUE(school_id, name) Foreign key school_id ->
+schools.id
+
+TABLE 17: school_sections Purpose: Sections within a class, when a
+school uses them.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - class_id TEXT
+NOT NULL - name TEXT NOT NULL - is_active INTEGER NOT NULL DEFAULT 1 -
+created_at TEXT NOT NULL - updated_at TEXT NOT NULL - UNIQUE(school_id,
+id) - UNIQUE(school_id, class_id, name) Foreign keys: - (school_id,
+class_id) -> school_classes(school_id, id)
+
+TABLE 18: wings Purpose: School departments/wings/boards such as Arts,
+Language, Media & IT.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - name TEXT NOT
+NULL - slug TEXT NOT NULL - description TEXT NULL - logo_file_id TEXT
+NULL - display_order INTEGER NOT NULL DEFAULT 0 - status TEXT NOT NULL
+CHECK active, inactive, archived - created_at TEXT NOT NULL - updated_at
+TEXT NOT NULL - UNIQUE(school_id, id) - UNIQUE(school_id, slug) Foreign
+key school_id -> schools.id
+
+TABLE 19: teams Purpose: Teams/houses/groups within a school or
+optionally within a wing.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - wing_id TEXT
+NULL - name TEXT NOT NULL - code TEXT NULL - description TEXT NULL -
+color TEXT NULL - status TEXT NOT NULL CHECK active, inactive,
+archived - created_at TEXT NOT NULL - updated_at TEXT NOT NULL -
+UNIQUE(school_id, id) - UNIQUE(school_id, name) Foreign keys: -
+school_id -> schools.id - (school_id, wing_id) -> wings(school_id, id)
+
+TABLE 20: wing_memberships Purpose: Assign school members to a wing and
+define their wing-level scope.
+
+Columns: - school_id TEXT NOT NULL - wing_id TEXT NOT NULL -
+membership_id TEXT NOT NULL - assignment_type TEXT NOT NULL CHECK
+manager, member, teacher - assigned_by TEXT NULL - assigned_at TEXT NOT
+NULL - revoked_at TEXT NULL PRIMARY KEY(school_id, wing_id,
+membership_id) Foreign keys: - (school_id, wing_id) -> wings(school_id,
+id) - (school_id, membership_id) -> school_memberships(school_id, id)
+
+Security: A Wing Manager must pass both permission check and wing
+resource-scope check. A generic programmes.update permission alone is
+insufficient if the programme belongs to another wing.
+
+======================================================================
+4. STUDENT AND STAFF TABLES
+======================================================================
+
+TABLE 21: students Purpose: Student profile inside one school.
+Authentication identity is optional until an individual student account
+is created.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - membership_id
+TEXT NULL - admission_number TEXT NULL - full_name TEXT NOT NULL -
+preferred_name TEXT NULL - class_id TEXT NULL - section_id TEXT NULL -
+team_id TEXT NULL - date_of_birth TEXT NULL - gender TEXT NULL -
+student_email TEXT NULL - student_phone TEXT NULL - guardian_name TEXT
+NULL - guardian_email TEXT NULL - guardian_phone TEXT NULL -
+profile_file_id TEXT NULL - status TEXT NOT NULL CHECK active, inactive,
+graduated, archived - joined_on TEXT NULL - left_on TEXT NULL -
+created_at TEXT NOT NULL - updated_at TEXT NOT NULL - created_by TEXT
+NULL - UNIQUE(school_id, id) - UNIQUE(school_id, admission_number)
+Foreign keys: - school_id -> schools.id - (school_id, membership_id) ->
+school_memberships(school_id, id) - (school_id, class_id) ->
+school_classes(school_id, id) - (school_id, section_id) ->
+school_sections(school_id, id) - (school_id, team_id) ->
+teams(school_id, id)
+
+Rules: - Do not require a student login to create a student record. - If
+student login is enabled, link the student to a membership and user. -
+Do not store unnecessary sensitive information. - Restrict guardian and
+date-of-birth access to authorized staff. - Do not expose private
+student records on the public website. - Admission number may be NULL;
+ensure uniqueness for non-NULL values. - Validate that section belongs
+to the selected class.
+
+TABLE 22: staff_profiles Purpose: Teacher and non-teaching staff
+profile.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - membership_id
+TEXT NOT NULL - employee_code TEXT NULL - full_name TEXT NOT NULL -
+job_title TEXT NULL - department TEXT NULL - work_email TEXT NULL -
+work_phone TEXT NULL - profile_file_id TEXT NULL - public_profile
+INTEGER NOT NULL DEFAULT 0 - status TEXT NOT NULL CHECK active,
+inactive, archived - joined_on TEXT NULL - left_on TEXT NULL -
+created_at TEXT NOT NULL - updated_at TEXT NOT NULL - UNIQUE(school_id,
+id) - UNIQUE(school_id, membership_id) Foreign keys: - (school_id,
+membership_id) -> school_memberships(school_id, id)
+
+Rules: - A staff profile is distinct from a role assignment. - A teacher
+can have additional roles through membership_roles. - Public visibility
+must be explicitly enabled.
+
+TABLE 23: student_team_memberships Purpose: Track a student’s team
+assignment history.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - student_id
+TEXT NOT NULL - team_id TEXT NOT NULL - starts_on TEXT NOT NULL -
+ends_on TEXT NULL - assigned_by TEXT NULL - created_at TEXT NOT NULL
+Foreign keys: - (school_id, student_id) -> students(school_id, id) -
+(school_id, team_id) -> teams(school_id, id)
+
+Rules: - Use this table when team history matters. - If students.team_id
+is retained for fast current display, update it in the same transaction
+as the active team membership. - Do not allow overlapping active
+assignments unless explicitly intended.
+
+======================================================================
+5. PROGRAMMES, ACTIVITIES AND PARTICIPATION
+======================================================================
+
+TABLE 24: programme_categories Purpose: Categories such as language,
+arts, intellectual skills, Islamic studies.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - name TEXT NOT
+NULL - slug TEXT NOT NULL - description TEXT NULL - display_order
+INTEGER NOT NULL DEFAULT 0 - is_active INTEGER NOT NULL DEFAULT 1 -
+created_at TEXT NOT NULL - updated_at TEXT NOT NULL - UNIQUE(school_id,
+id) - UNIQUE(school_id, slug) Foreign key school_id -> schools.id
+
+TABLE 25: programmes Purpose: Main scheduled activity/event record.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL -
+programme_code TEXT NULL - title TEXT NOT NULL - slug TEXT NULL -
+summary TEXT NULL - description TEXT NULL - category_id TEXT NULL -
+wing_id TEXT NULL - school_year_id TEXT NULL - programme_type TEXT NOT
+NULL - participation_type TEXT NOT NULL CHECK individual, team, group -
+stage_type TEXT NULL - venue TEXT NULL - starts_at TEXT NULL - ends_at
+TEXT NULL - registration_opens_at TEXT NULL - registration_closes_at
+TEXT NULL - capacity INTEGER NULL - is_registration_required INTEGER NOT
+NULL DEFAULT 0 - is_public INTEGER NOT NULL DEFAULT 0 - status TEXT NOT
+NULL CHECK draft, scheduled, published, completed, cancelled, archived -
+cover_file_id TEXT NULL - created_by TEXT NOT NULL - updated_by TEXT
+NULL - published_at TEXT NULL - created_at TEXT NOT NULL - updated_at
+TEXT NOT NULL - UNIQUE(school_id, id) - UNIQUE(school_id,
+programme_code) Foreign keys: - school_id -> schools.id - (school_id,
+category_id) -> programme_categories(school_id, id) - (school_id,
+wing_id) -> wings(school_id, id) - (school_id, school_year_id) ->
+school_years(school_id, id)
+
+Rules: - Draft is private; published is public only if is_public = 1. -
+Publishing requires programmes.publish permission. - Validate end time
+after start time. - Validate registration close time and capacity. - A
+programme may be public without requiring student registration. - If a
+programme is wing-scoped, resource authorization must verify
+wing_memberships. - Do not delete completed programme history.
+
+TABLE 26: programme_judges Purpose: Assign judges/reviewers to a
+programme.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - programme_id
+TEXT NOT NULL - staff_id TEXT NULL - external_name TEXT NULL -
+external_email TEXT NULL - role_label TEXT NULL - assigned_by TEXT
+NULL - created_at TEXT NOT NULL Foreign keys: - (school_id,
+programme_id) -> programmes(school_id, id) - (school_id, staff_id) ->
+staff_profiles(school_id, id)
+
+Rules: - At least staff_id or external_name must be provided. - External
+judge contact information is private by default.
+
+TABLE 27: programme_registrations Purpose: Student or team registration
+for a programme.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - programme_id
+TEXT NOT NULL - student_id TEXT NULL - team_id TEXT NULL -
+registered_by_membership_id TEXT NULL - registration_status TEXT NOT
+NULL CHECK pending, approved, waitlisted, rejected, cancelled -
+registered_at TEXT NOT NULL - reviewed_by TEXT NULL - reviewed_at TEXT
+NULL - note_private TEXT NULL - UNIQUE(school_id, id) Foreign keys: -
+(school_id, programme_id) -> programmes(school_id, id) - (school_id,
+student_id) -> students(school_id, id) - (school_id, team_id) ->
+teams(school_id, id) - (school_id, registered_by_membership_id) ->
+school_memberships(school_id, id)
+
+Rules: - Exactly one of student_id or team_id must be non-NULL,
+according to programme participation_type. Enforce with CHECK and
+application rules. - Prevent duplicate active registration for the same
+programme/student or programme/team with unique indexes. - Capacity
+checks must occur transactionally to avoid overbooking. - Students can
+only register for programmes permitted by school policy.
+
+TABLE 28: programme_participants Purpose: Actual participant roster
+after selection/approval.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - programme_id
+TEXT NOT NULL - registration_id TEXT NULL - student_id TEXT NOT NULL -
+participant_status TEXT NOT NULL CHECK selected, confirmed, withdrawn,
+completed, absent - created_at TEXT NOT NULL - updated_at TEXT NOT
+NULL - UNIQUE(school_id, programme_id, student_id) Foreign keys: -
+(school_id, programme_id) -> programmes(school_id, id) - (school_id,
+registration_id) -> programme_registrations(school_id, id) - (school_id,
+student_id) -> students(school_id, id)
+
+TABLE 29: programme_results Purpose: Optional result, ranking or
+evaluation. Not a full examination engine.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - programme_id
+TEXT NOT NULL - participant_id TEXT NOT NULL - score_value REAL NULL -
+score_label TEXT NULL - rank INTEGER NULL - result_note TEXT NULL -
+visibility TEXT NOT NULL DEFAULT ‘private’ CHECK private, school,
+public - entered_by TEXT NOT NULL - approved_by TEXT NULL - created_at
+TEXT NOT NULL - updated_at TEXT NOT NULL Foreign keys: - (school_id,
+programme_id) -> programmes(school_id, id) - (school_id, participant_id)
+-> programme_participants(school_id, id)
+
+Rules: - Do not publish results without explicit approval and visibility
+setting. - Restrict private judge notes. - Record edits in audit_logs.
+
+TABLE 30: programme_resources Purpose: Link supporting files to
+programmes.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - programme_id
+TEXT NOT NULL - file_id TEXT NOT NULL - resource_type TEXT NOT NULL
+CHECK brief, rules, poster, certificate, presentation, other -
+display_order INTEGER NOT NULL DEFAULT 0 - created_at TEXT NOT NULL
+Foreign keys: - (school_id, programme_id) -> programmes(school_id, id) -
+(school_id, file_id) -> files(school_id, id)
+
+======================================================================
+6. ACHIEVEMENTS AND STUDENT RECOGNITION
+======================================================================
+
+TABLE 31: achievements Purpose: School/team/student achievements.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - title TEXT
+NOT NULL - description TEXT NULL - achievement_type TEXT NOT NULL CHECK
+student, team, school, staff - achievement_date TEXT NULL - programme_id
+TEXT NULL - wing_id TEXT NULL - visibility TEXT NOT NULL DEFAULT ‘draft’
+CHECK draft, school, public, archived - cover_file_id TEXT NULL -
+created_by TEXT NOT NULL - approved_by TEXT NULL - published_at TEXT
+NULL - created_at TEXT NOT NULL - updated_at TEXT NOT NULL -
+UNIQUE(school_id, id) Foreign keys: - school_id -> schools.id -
+(school_id, programme_id) -> programmes(school_id, id) - (school_id,
+wing_id) -> wings(school_id, id)
+
+TABLE 32: achievement_recipients Purpose: Connect an achievement to one
+or more recipients.
+
+Columns: - school_id TEXT NOT NULL - achievement_id TEXT NOT NULL -
+student_id TEXT NULL - staff_id TEXT NULL - team_id TEXT NULL PRIMARY
+KEY(school_id, achievement_id, student_id, staff_id, team_id) Foreign
+keys to corresponding same-school tables.
+
+Implementation note: SQLite composite primary keys with nullable members
+can behave unexpectedly. A safer production implementation may use a
+separate id plus a CHECK that exactly one recipient column is non-NULL,
+and unique partial indexes for each recipient type. Use that safer form
+in the actual migration.
+
+======================================================================
+7. PUBLIC CONTENT: NEWS, NOTICES, PAGES AND GALLERY
+======================================================================
+
+TABLE 33: content_pages Purpose: Custom public website pages such as
+About, History, Mission and Vision.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - title TEXT
+NOT NULL - slug TEXT NOT NULL - page_type TEXT NOT NULL - content_json
+TEXT NOT NULL - seo_title TEXT NULL - seo_description TEXT NULL -
+visibility TEXT NOT NULL CHECK draft, published, archived - published_at
+TEXT NULL - created_by TEXT NOT NULL - updated_by TEXT NULL - created_at
+TEXT NOT NULL - updated_at TEXT NOT NULL - UNIQUE(school_id, id) -
+UNIQUE(school_id, slug) Foreign key school_id -> schools.id
+
+Rules: - Sanitize rich text/HTML; never render arbitrary unsafe HTML. -
+Validate content_json schema. - Draft pages are not accessible
+publicly. - Published pages are visible only on the owning school’s
+host.
+
+TABLE 34: news_posts Purpose: News and announcements for public or
+school audiences.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - title TEXT
+NOT NULL - slug TEXT NOT NULL - excerpt TEXT NULL - body_json TEXT NOT
+NULL - cover_file_id TEXT NULL - author_membership_id TEXT NULL -
+visibility TEXT NOT NULL CHECK draft, school, public, archived -
+published_at TEXT NULL - created_at TEXT NOT NULL - updated_at TEXT NOT
+NULL - UNIQUE(school_id, id) - UNIQUE(school_id, slug) Foreign keys: -
+school_id -> schools.id - (school_id, author_membership_id) ->
+school_memberships(school_id, id)
+
+TABLE 35: notices Purpose: Official notices, circulars and school
+announcements.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - title TEXT
+NOT NULL - body TEXT NOT NULL - notice_number TEXT NULL - audience TEXT
+NOT NULL CHECK public, students, staff, selected - visibility TEXT NOT
+NULL CHECK draft, published, archived - starts_at TEXT NULL - expires_at
+TEXT NULL - attachment_file_id TEXT NULL - created_by TEXT NOT NULL -
+published_at TEXT NULL - created_at TEXT NOT NULL - updated_at TEXT NOT
+NULL - UNIQUE(school_id, id) Foreign key school_id -> schools.id
+
+TABLE 36: notice_audiences Purpose: Specific recipients/classes/sections
+for selected notices.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - notice_id
+TEXT NOT NULL - audience_type TEXT NOT NULL CHECK class, section, team,
+membership - audience_ref_id TEXT NOT NULL - created_at TEXT NOT NULL
+Foreign key (school_id, notice_id) -> notices(school_id, id)
+
+Security: Because audience_ref_id is polymorphic, validate its
+referenced table and school ownership in application logic or use
+separate typed join tables. Do not rely on an unchecked string ID.
+
+TABLE 37: gallery_albums Purpose: Photo/video albums.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - title TEXT
+NOT NULL - slug TEXT NOT NULL - description TEXT NULL - event_date TEXT
+NULL - cover_file_id TEXT NULL - visibility TEXT NOT NULL CHECK draft,
+school, public, archived - created_by TEXT NOT NULL - created_at TEXT
+NOT NULL - updated_at TEXT NOT NULL - UNIQUE(school_id, id) -
+UNIQUE(school_id, slug) Foreign key school_id -> schools.id
+
+TABLE 38: gallery_items Purpose: Individual images/videos in an album.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - album_id TEXT
+NOT NULL - file_id TEXT NOT NULL - caption TEXT NULL - alt_text TEXT
+NULL - display_order INTEGER NOT NULL DEFAULT 0 - visibility TEXT NOT
+NULL CHECK draft, school, public, archived - created_at TEXT NOT NULL -
+updated_at TEXT NOT NULL - UNIQUE(school_id, id) Foreign keys: -
+(school_id, album_id) -> gallery_albums(school_id, id) - (school_id,
+file_id) -> files(school_id, id)
+
+Rules: - Obtain consent/permission for identifiable student photos as
+required. - Never publish a private student image by changing only a
+frontend flag. - Public file access must be checked server-side or
+through a safe public delivery mechanism.
+
+======================================================================
+8. FILES AND GOOGLE DRIVE STORAGE
+======================================================================
+
+TABLE 39: storage_connections Purpose: One or more storage connections
+for a school, initially Google Drive.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - provider TEXT
+NOT NULL CHECK google_drive - connection_name TEXT NOT NULL -
+google_account_email TEXT NULL - drive_root_folder_id TEXT NULL -
+credential_secret_ref TEXT NOT NULL - connection_status TEXT NOT NULL
+CHECK pending, connected, reconnect_required, disconnected, error -
+connected_by_membership_id TEXT NULL - connected_at TEXT NULL -
+last_verified_at TEXT NULL - last_error_code TEXT NULL - created_at TEXT
+NOT NULL - updated_at TEXT NOT NULL - UNIQUE(school_id, id) Foreign
+keys: - school_id -> schools.id - (school_id,
+connected_by_membership_id) -> school_memberships(school_id, id)
+
+Security: credential_secret_ref points to an encrypted secret in a
+secrets manager. Never store refresh_token, access_token, client_secret
+or encryption key in this table or any JSON field in Turso. Use minimum
+OAuth scopes. Verify OAuth state, nonce, redirect URI and requesting
+school/admin. Encrypt credentials at rest. Rotate/revoke tokens on
+disconnect. A departing admin must not silently own the school’s
+permanent storage connection.
+
+TABLE 40: files Purpose: Metadata for all uploaded documents and media.
+Binary files remain in Drive.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL -
+storage_connection_id TEXT NOT NULL - provider_file_id TEXT NOT NULL -
+original_name TEXT NOT NULL - safe_display_name TEXT NULL - mime_type
+TEXT NOT NULL - file_extension TEXT NULL - size_bytes INTEGER NOT NULL -
+checksum_sha256 TEXT NULL - category TEXT NOT NULL - access_level TEXT
+NOT NULL CHECK private, school, public - file_status TEXT NOT NULL CHECK
+pending, active, quarantined, deleted, failed -
+uploaded_by_membership_id TEXT NULL - uploaded_at TEXT NOT NULL -
+deleted_at TEXT NULL - created_at TEXT NOT NULL - updated_at TEXT NOT
+NULL - UNIQUE(school_id, id) - UNIQUE(school_id, storage_connection_id,
+provider_file_id) Foreign keys: - (school_id, storage_connection_id) ->
+storage_connections(school_id, id) - (school_id,
+uploaded_by_membership_id) -> school_memberships(school_id, id)
+
+Rules: - Validate MIME type by inspecting file bytes where possible; do
+not trust filename extension or browser Content-Type. - Enforce
+configured size and type limits. - Quarantine suspicious files; scan
+before making downloadable. - Use random internal object IDs; do not
+expose predictable private Drive IDs. - Private downloads must go
+through backend authorization. - Public access must be explicit and
+revocable. - Do not treat Google Drive share links as secure
+authorization. - Store checksum to detect duplicate/corrupt uploads
+where useful. - A file row must not become active until upload
+verification succeeds.
+
+TABLE 41: file_access_logs Purpose: Security log for sensitive file
+access and downloads.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - file_id TEXT
+NOT NULL - actor_user_id TEXT NULL - action TEXT NOT NULL CHECK preview,
+download, share, revoke, delete - result TEXT NOT NULL CHECK allowed,
+denied, failed - ip_hash TEXT NULL - user_agent_summary TEXT NULL -
+created_at TEXT NOT NULL Foreign keys: - (school_id, file_id) ->
+files(school_id, id)
+
+Do not log raw access tokens, full private URLs or unnecessary personal
+data. Apply retention policy.
+
+TABLE 42: file_upload_jobs Purpose: Reliable asynchronous file uploads
+and processing.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NOT NULL - file_id TEXT
+NOT NULL - job_status TEXT NOT NULL CHECK pending, processing,
+completed, failed - attempts INTEGER NOT NULL DEFAULT 0 -
+next_attempt_at TEXT NULL - last_error_code TEXT NULL - created_at TEXT
+NOT NULL - updated_at TEXT NOT NULL Foreign keys: - (school_id, file_id)
+-> files(school_id, id)
+
+Rules: - Idempotent job processing. - Retry with exponential backoff and
+maximum attempts. - Do not retry permanent validation/security failures
+indefinitely. - Never mark the file active before successful Drive
+upload and verification.
+
+======================================================================
+9. NOTIFICATIONS, EMAIL AND USER ACTIVITY
+======================================================================
+
+TABLE 43: notifications Purpose: In-app notifications for users.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NULL - user_id TEXT NOT
+NULL - notification_type TEXT NOT NULL - title TEXT NOT NULL - message
+TEXT NOT NULL - action_url TEXT NULL - read_at TEXT NULL - created_at
+TEXT NOT NULL Foreign keys: - school_id -> schools.id - user_id ->
+users.id
+
+Rules: - If school_id is set, verify the recipient has a relevant
+membership. - Never include private student or secret data in
+notification text. - Use safe internal URLs only.
+
+TABLE 44: email_jobs Purpose: Reliable email/invitation/notification
+sending queue.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NULL - recipient_email
+TEXT NOT NULL - template_key TEXT NOT NULL - payload_json TEXT NOT
+NULL - job_status TEXT NOT NULL CHECK pending, processing, sent, failed,
+cancelled - attempts INTEGER NOT NULL DEFAULT 0 - next_attempt_at TEXT
+NULL - provider_message_id TEXT NULL - last_error_code TEXT NULL -
+created_at TEXT NOT NULL - sent_at TEXT NULL - updated_at TEXT NOT NULL
+Foreign key school_id -> schools.id
+
+Rules: - Validate payload schema per template. - Do not place secrets or
+sensitive student data in email payloads. - Avoid duplicate emails
+through idempotency keys or event IDs. - Rate-limit and retry transient
+provider errors.
+
+TABLE 45: user_sessions_audit Purpose: Optional application-level
+security event history. Supabase remains the authentication/session
+authority.
+
+Columns: - id TEXT PRIMARY KEY - user_id TEXT NULL - event_type TEXT NOT
+NULL - result TEXT NOT NULL - ip_hash TEXT NULL - user_agent_summary
+TEXT NULL - event_at TEXT NOT NULL - metadata_json TEXT NULL Foreign key
+user_id -> users.id
+
+Do not store Supabase access tokens or refresh tokens here.
+
+======================================================================
+10. AUDIT, OUTBOX AND BACKGROUND SERVICE TABLES
+======================================================================
+
+TABLE 46: audit_logs Purpose: Append-only record of important platform
+and school actions.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NULL - actor_user_id
+TEXT NULL - actor_membership_id TEXT NULL - action TEXT NOT NULL -
+resource_type TEXT NOT NULL - resource_id TEXT NULL - result TEXT NOT
+NULL CHECK success, denied, failed - reason_code TEXT NULL - request_id
+TEXT NULL - ip_hash TEXT NULL - user_agent_summary TEXT NULL -
+before_json TEXT NULL - after_json TEXT NULL - created_at TEXT NOT NULL
+Foreign keys: - school_id -> schools.id - actor_user_id -> users.id -
+(school_id, actor_membership_id) -> school_memberships(school_id, id)
+
+Rules: - Append-only: application roles cannot update/delete audit
+records. - Do not store passwords, tokens, secret keys, or full
+sensitive payloads. - Redact private fields before writing
+before_json/after_json. - Record school creation, approval/rejection,
+role changes, invitations, suspension, publication, file
+sharing/deletion and sensitive access. - Restrict audit viewing to
+authorized roles. - Consider a separate immutable external audit sink
+for high-assurance deployments.
+
+TABLE 47: outbox_events Purpose: Transactional outbox for reliable work
+that crosses systems, especially Turso + Supabase + email + Google
+Drive.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NULL - event_type TEXT
+NOT NULL - aggregate_type TEXT NOT NULL - aggregate_id TEXT NOT NULL -
+payload_json TEXT NOT NULL - idempotency_key TEXT NOT NULL UNIQUE -
+event_status TEXT NOT NULL CHECK pending, processing, completed,
+failed - attempts INTEGER NOT NULL DEFAULT 0 - next_attempt_at TEXT
+NULL - locked_at TEXT NULL - processed_at TEXT NULL - last_error_code
+TEXT NULL - created_at TEXT NOT NULL - updated_at TEXT NOT NULL Foreign
+key school_id -> schools.id
+
+Rules: - Insert the business row and outbox event in the SAME Turso
+transaction. - Worker claims pending events safely. - Idempotency key
+prevents duplicate side effects. - Use bounded retries and exponential
+backoff. - Dead-letter or mark permanently failed after configured
+attempts. - Never put raw tokens or secrets in payload_json.
+
+TABLE 48: background_jobs Purpose: Generic scheduled/async job queue for
+work not represented by a domain event.
+
+Columns: - id TEXT PRIMARY KEY - school_id TEXT NULL - job_type TEXT NOT
+NULL - payload_json TEXT NOT NULL - job_status TEXT NOT NULL CHECK
+pending, processing, completed, failed, cancelled - priority INTEGER NOT
+NULL DEFAULT 5 - attempts INTEGER NOT NULL DEFAULT 0 - max_attempts
+INTEGER NOT NULL DEFAULT 8 - run_after TEXT NOT NULL - locked_by TEXT
+NULL - locked_at TEXT NULL - completed_at TEXT NULL - last_error_code
+TEXT NULL - created_at TEXT NOT NULL - updated_at TEXT NOT NULL Foreign
+key school_id -> schools.id
+
+TABLE 49: idempotency_keys Purpose: Prevent duplicate API mutations when
+a client retries after a timeout.
+
+Columns: - id TEXT PRIMARY KEY - scope_key TEXT NOT NULL -
+idempotency_key TEXT NOT NULL - request_hash TEXT NOT NULL -
+response_status INTEGER NULL - response_json TEXT NULL - created_at TEXT
+NOT NULL - expires_at TEXT NOT NULL - UNIQUE(scope_key, idempotency_key)
+
+Rules: - scope_key includes authenticated actor and relevant
+tenant/endpoint. - Reusing the same key with a different request_hash
+must be rejected. - Do not cache secret-bearing responses. - Expire old
+records using a cleanup job.
+
+TABLE 50: system_settings Purpose: Platform-wide non-secret
+configuration.
+
+Columns: - setting_key TEXT PRIMARY KEY - setting_value_json TEXT NOT
+NULL - updated_by TEXT NULL - updated_at TEXT NOT NULL
+
+Rules: - No credentials, signing keys or encryption secrets. - Validate
+each setting against a schema. - Changes require platform permission and
+audit log.
+
+TABLE 51: schema_migrations Purpose: Track applied database migrations.
+
+Columns: - version TEXT PRIMARY KEY - name TEXT NOT NULL - checksum TEXT
+NOT NULL - applied_at TEXT NOT NULL - applied_by TEXT NULL
+
+Rules: - Migrations run in controlled deployment, not during normal
+requests. - Never edit an already-applied migration; create a new
+migration. - Verify checksum and deployment compatibility.
+
+======================================================================
+11. OPTIONAL FUTURE TABLES (DO NOT BUILD UNLESS REQUIRED)
+======================================================================
+
+These modules are not required for the first release: -
+attendance_records - examination_sessions - examination_questions -
+examination_answers - marksheets - fee_invoices - fee_payments -
+library_books - library_loans - transport_routes - hostel_rooms -
+parent_guardian_links - timetable_entries - learning_courses -
+course_enrollments - certificate_templates - certificate_issuances -
+subscription_plans - school_subscriptions - invoices -
+payment_transactions
+
+Do not add these simply because they are common in school software. Add
+a module only after its workflow, data access, permissions, retention
+and legal/privacy requirements are defined.
+
+======================================================================
+12. SCHOOL CREATION: EXACT AUTOMATIC PROVISIONING FLOW
+======================================================================
+
+There are two entry paths, but both must call ONE shared provisioning
+service. Never duplicate school-creation logic in two controllers.
+
+PATH A: SUPERADMIN CREATES SCHOOL 1. SuperAdmin signs in through
+Supabase Auth. 2. Backend verifies JWT signature, issuer, audience,
+expiry and subject. 3. Backend loads users row and confirms
+account_status = active. 4. Backend checks platform role and
+platform.schools.create permission. 5. Validate school name, slug,
+contact details and timezone. 6. Check slug availability and reserved
+slug list. 7. Begin Turso transaction. 8. Insert schools row with status
+= pending or provisioning state supported by the implementation. 9.
+Insert school_settings with secure defaults. 10. Insert default
+school_roles. 11. Insert required default role_permissions. 12. Insert
+optional default programme categories/classes only if the product
+explicitly defines those defaults. 13. Create initial School Admin
+invitation record with token hash. 14. Insert outbox_events for
+invitation email and provisioning completion. 15. Insert audit_logs
+record. 16. Commit transaction. 17. Worker sends invitation through
+email provider. 18. Admin accepts invitation; user identity is
+linked/created and membership_roles are assigned. 19. Verify subdomain
+routing and school status. 20. Activate school after required setup
+checks.
+
+PATH B: PUBLIC SCHOOL REGISTRATION REQUEST 1. Public user opens
+/register-school. 2. Backend validates and rate-limits request. 3.
+Insert school_onboarding_requests with status pending. 4. Send
+acknowledgement email via email_jobs/outbox. 5. SuperAdmin reviews
+request. 6. Approval action verifies platform.onboarding.approve
+permission. 7. Run the SAME school provisioning service used in Path A.
+8. Link created school_id to onboarding request. 9. Update request to
+approved with reviewer and timestamp. 10. Send initial admin invitation.
+11. Record audit logs and outbox events. 12. If rejected, update request
+to rejected and record review metadata. 13. Public users never directly
+create active schools or roles.
+
+DEFAULT RECORDS CREATED FOR A NEW SCHOOL Required: - schools -
+school_settings - default school_roles - role_permissions for approved
+default permission matrix - initial school invitation - audit_logs
+entry - outbox_events entry
+
+Optional, only if product defaults are approved: - school_years -
+school_classes - programme_categories - default content_pages - default
+wings
+
+Do NOT automatically create: - fake students - fake staff - fake
+achievements - fake programmes - fake news - fake gallery photos -
+Google Drive connection without OAuth consent
+
+GOOGLE DRIVE IS NOT CONNECTED AUTOMATICALLY. After the school admin
+accepts invitation: 1. Admin opens Storage Settings. 2. Backend creates
+OAuth state bound to school and user/session. 3. Redirect to Google
+consent. 4. Callback validates state, nonce and exact redirect URI. 5.
+Exchange authorization code server-side. 6. Encrypt credentials in
+secrets manager. 7. Save secret reference and Drive root folder metadata
+in storage_connections. 8. Verify Drive access. 9. Record audit event.
+10. If verification fails, mark connection error and allow safe retry.
+
+PROVISIONING FAILURE HANDLING Turso cannot atomically commit with
+Supabase, email or Google APIs. Therefore: - Commit core school records
+and outbox event in one Turso transaction. - Worker performs external
+actions after commit. - Every worker operation must be idempotent. -
+Retry transient failures. - Keep permanent failures visible to
+SuperAdmin. - Do not create duplicate schools/invitations on retry. -
+Provide a provisioning status screen and a safe retry action. - If a
+school row exists but invitation sending failed, retry invitation; do
+not create a second school.
+
+======================================================================
+13. WHO CAN READ OR UPDATE WHICH TABLES
+======================================================================
+
+SUPERADMIN: - Can manage platform-level schools, onboarding, platform
+users, platform roles, system settings and audit visibility according to
+permissions. - Should not automatically read every student’s private
+details. - Cross-tenant data access must be justified, limited and
+audited. - Support staff should use least-privilege access.
+
+SCHOOL ADMIN: - Can manage permitted records for their own school. -
+Cannot access another school’s rows. - Cannot assign platform roles. -
+Cannot change school_id to move records across tenants. - Cannot view
+secrets in storage_connections.
+
+WING MANAGER: - Can manage only assigned wing-scoped records. - Must
+have required permission AND matching wing_memberships scope. - Cannot
+manage school-wide roles, storage credentials or other wings unless
+separately granted.
+
+TEACHER: - Limited to assigned classes, students, programmes or wings. -
+Access to student private fields must be explicit.
+
+CONTENT MANAGER: - Can draft/edit assigned public content and media. -
+Publishing may require separate publish permission/approval. - Cannot
+read private student records by default.
+
+STUDENT: - Can view permitted public/school content. - Can manage only
+their own permitted profile fields. - Can register for eligible
+programmes. - Can view their own participation and achievements. -
+Cannot enumerate other students or change their own role.
+
+PUBLIC VISITOR: - Can read only published public content for the
+resolved school. - Cannot read drafts, private notices, student records,
+membership lists, file metadata, audit logs or settings.
+
+Authorization check order for every protected request: 1. Verify
+Supabase JWT cryptographically on the server. 2. Resolve user by JWT
+subject (supabase_uid). 3. Check users.account_status. 4. Resolve tenant
+from trusted host mapping. 5. Check schools.status. 6. Check active
+school_memberships row. 7. Load current membership_roles. 8. Resolve
+permissions server-side. 9. Check resource scope
+(wing/class/owner/etc.). 10. Validate requested operation and input. 11.
+Execute tenant-scoped query. 12. Write audit event for sensitive
+actions. 13. Return minimum necessary data.
+
+Never trust: - role sent by frontend - school_id sent by frontend -
+permission array stored in localStorage - user_id supplied as the acting
+identity - arbitrary X-Forwarded-Host header - client-supplied Drive
+file IDs without tenant ownership validation
+
+======================================================================
+14. WHEN EACH TABLE IS CREATED, UPDATED OR ARCHIVED
+======================================================================
+
+users: Create on first verified application identity sync. Update
+approved profile fields and account state. Disable rather than delete.
+
+schools: Create only through provisioning. Update profile/status through
+authorized flows. Suspend/archive without deleting tenant data.
+
+platform_roles / platform_permissions: Seed through migrations. Change
+only through controlled platform administration and migrations where
+appropriate.
+
+school_memberships: Create when invitation is accepted or a
+SuperAdmin-approved admin provisioning action creates membership. Update
+status on suspension, revocation or reactivation.
+
+school_roles / role_permissions / membership_roles: Create default roles
+during school provisioning. Update on role/permission administration.
+Revoke assignments with audit trail.
+
+school_invitations: Create when an authorized inviter invites a person.
+Update on acceptance, expiry or revocation. Cleanup only after retention
+period.
+
+school_onboarding_requests: Create on public request. Update during
+review/approval/rejection.
+
+school_settings: Create exactly once during provisioning. Update through
+validated School Admin settings endpoints.
+
+wings, teams, classes, sections, categories: Create/update/archive
+through school administration. Never silently delete records referenced
+by historical activities.
+
+students / staff_profiles: Create through authorized school
+workflows/imports. Update permitted fields. Archive when leaving. Keep
+historical programme participation.
+
+programmes: Create as draft. Update while draft/scheduled according to
+policy. Publish only with publish permission. Complete/cancel/archive
+with history retained.
+
+registrations: Create on eligible registration. Update status through
+approval/cancel workflow. Do not erase registration history.
+
+participants/results: Create after selection/participation. Update with
+audit log. Publish results only after approval and explicit visibility
+selection.
+
+achievements: Create as draft. Approve/publish explicitly. Archive
+rather than delete.
+
+content_pages/news_posts/notices/gallery: Create draft; edit; preview;
+publish; archive. Public queries must filter published state, public
+visibility and owning school.
+
+storage_connections: Create only after valid OAuth callback. Update
+verification/status. Disconnect by revoking credentials and clearing
+secret reference after safe revocation workflow.
+
+files: Create pending metadata before upload. Mark active after verified
+upload. Quarantine suspicious files. Delete by revoking access and
+applying retention/deletion policy.
+
+audit_logs: Insert only. No ordinary update/delete.
+
+outbox_events/background_jobs/email_jobs/file_upload_jobs: Create
+transactionally with the event/action. Worker changes status, attempts,
+locks and completion timestamps.
+
+idempotency_keys: Create for mutation request. Reuse for retries. Delete
+after expiry.
+
+schema_migrations: Insert only during deployment migration process.
+
+======================================================================
+15. INDEXES AND CONSTRAINTS
+======================================================================
+
+Create indexes for actual query paths. At minimum:
+
+users: - UNIQUE(supabase_uid) - INDEX(email_normalized) if email lookup
+is required
+
+schools: - UNIQUE(slug) - INDEX(status)
+
+school_memberships: - UNIQUE(school_id, user_id) - INDEX(user_id,
+membership_status) - INDEX(school_id, membership_status)
+
+school_roles: - UNIQUE(school_id, role_key)
+
+membership_roles: - INDEX(school_id, membership_id) - INDEX(school_id,
+role_id)
+
+school_invitations: - UNIQUE(token_hash) - INDEX(school_id,
+invitation_status, expires_at) - INDEX(email_normalized,
+invitation_status)
+
+school_onboarding_requests: - INDEX(request_status, created_at) -
+INDEX(requested_slug)
+
+students: - UNIQUE(school_id, admission_number) for non-NULL values -
+INDEX(school_id, class_id, status) - INDEX(school_id, team_id, status) -
+INDEX(school_id, full_name)
+
+staff_profiles: - INDEX(school_id, status) - UNIQUE(school_id,
+employee_code) for non-NULL values
+
+wings: - UNIQUE(school_id, slug) - INDEX(school_id, status)
+
+programmes: - INDEX(school_id, status, starts_at) - INDEX(school_id,
+wing_id, starts_at) - INDEX(school_id, category_id, starts_at) -
+UNIQUE(school_id, slug) where slug is not NULL
+
+programme_registrations: - INDEX(school_id, programme_id,
+registration_status) - INDEX(school_id, student_id) - Unique active
+registration index as required
+
+news_posts/notices/content_pages: - INDEX(school_id, visibility,
+published_at) - UNIQUE(school_id, slug)
+
+files: - UNIQUE(school_id, storage_connection_id, provider_file_id) -
+INDEX(school_id, file_status, category) - INDEX(school_id, access_level)
+
+audit_logs: - INDEX(school_id, created_at) - INDEX(actor_user_id,
+created_at) - INDEX(resource_type, resource_id)
+
+outbox_events/background_jobs: - INDEX(event_status, next_attempt_at) -
+INDEX(job_status, run_after) - UNIQUE(idempotency_key)
+
+Use CHECK constraints for status, boolean values, nonnegative sizes,
+capacity, and valid time ranges. Use composite foreign keys for tenant
+integrity. Add partial unique indexes for optional unique values where
+SQLite supports them.
+
+Do not add indexes to every column. Indexes consume storage and slow
+writes; add them based on query patterns and query plans.
+
+======================================================================
+16. TRANSACTION RULES
+======================================================================
+
+Use a single Turso transaction for logically atomic operations such as:
+
+A. Accept invitation: - validate invitation in transaction - create/link
+membership - assign approved role(s) - mark invitation accepted - insert
+audit log - insert outbox event if notification is required - commit
+
+B. Create programme: - insert programme - insert associated resources or
+metadata as applicable - insert audit log - commit
+
+C. Approve registration: - verify programme capacity - update
+registration status - insert participant if selected - insert audit
+log - commit
+
+D. Change roles: - revoke old assignment - insert new assignment - audit
+change - invalidate permission cache via outbox event - commit
+
+E. School provisioning: - insert school and default
+settings/roles/permissions assignments - insert initial invitation -
+insert audit/outbox events - commit
+
+Do not hold a database transaction open while waiting for Google, email,
+Supabase or other network calls. Use outbox/background jobs.
+
+======================================================================
+17. REQUIRED BACKEND SERVICES
+======================================================================
+
+AUTHENTICATION SERVICE - Verify Supabase JWT using trusted signing
+keys/JWKS and expected issuer, audience, expiry and subject. - Do not
+decode JWT and assume it is valid. - Resolve users by supabase_uid. -
+Handle disabled/locked accounts. - Never expose Supabase service/secret
+keys to browser code.
+
+TENANT RESOLUTION SERVICE - Map trusted hostname/subdomain to
+schools.slug. - Reject unknown, malformed and reserved hostnames. -
+Never rely on arbitrary forwarded host headers. - Attach validated
+school context to request server-side.
+
+AUTHORIZATION SERVICE - Load current platform roles or school membership
+roles. - Evaluate exact permission keys. - Evaluate resource scope,
+e.g. assigned wing. - Default deny. - Invalidate caches after role,
+permission or membership updates. - Avoid long-lived permission cache
+without revocation strategy.
+
+SCHOOL PROVISIONING SERVICE - One implementation for SuperAdmin creation
+and approved onboarding. - Idempotent. - Creates required default
+records and invitation. - Writes audit and outbox records. - Supports
+retry and visible provisioning status.
+
+INVITATION SERVICE - Create secure random token. - Store only token
+hash. - Enforce expiry, single-use and school binding. - Verify intended
+email. - Create/link user and membership. - Assign only approved roles.
+
+STUDENT SERVICE - Create/update/archive student. - Validate
+class/section/team same-school relationship. - Restrict
+personal/guardian data. - Support bulk import with validation report and
+rollback strategy.
+
+PROGRAMME SERVICE - Create/edit/schedule/publish/cancel/complete. -
+Enforce registration windows and capacity. - Enforce wing scope. - Keep
+history.
+
+CONTENT PUBLISHING SERVICE - Draft, preview, approve, publish, unpublish
+and archive. - Sanitize content. - Ensure public pages only return
+explicitly published records.
+
+FILE SERVICE - Validate upload permissions and limits. - Upload to the
+school’s connected Drive. - Verify provider response/checksum. - Store
+metadata. - Scan/quarantine as configured. - Authorize private downloads
+server-side. - Revoke public access on unpublish/delete.
+
+GOOGLE DRIVE OAUTH SERVICE - Validate state and callback. - Encrypt
+tokens outside Turso. - Store secret reference. - Create/use a
+school-specific root folder. - Support reconnect, disconnect, token
+revocation and admin handover.
+
+AUDIT SERVICE - Append-only events. - Redact secrets and sensitive
+data. - Include request ID and actor context. - Record denied high-risk
+operations as appropriate.
+
+OUTBOX WORKER - Poll/claim pending events safely. - Process
+idempotently. - Retry transient failures. - Record permanent failures. -
+Expose operational health to SuperAdmin.
+
+EMAIL SERVICE - Invitation, onboarding acknowledgement,
+approval/rejection and notification templates. - Queue-based sending. -
+Rate limits, retry and delivery status.
+
+REPORTING SERVICE - Tenant-scoped participation, programme and
+achievement reports. - Aggregate only data the requester is authorized
+to see. - Export files with expiry and access controls.
+
+======================================================================
+18. API ROUTE SECURITY RULES
+======================================================================
+
+Suggested routes:
+
+Public: - POST /api/public/school-registration - GET
+/api/public/schools/{slug} - GET /api/public/{schoolSlug}/pages - GET
+/api/public/{schoolSlug}/news - GET /api/public/{schoolSlug}/notices -
+GET /api/public/{schoolSlug}/gallery
+
+Authentication/session: - GET /api/auth/me - POST /api/auth/sync - POST
+/api/invitations/accept
+
+Platform: - GET /api/platform/dashboard - GET/POST
+/api/platform/schools - GET/PATCH /api/platform/schools/{schoolId} -
+POST /api/platform/schools/{schoolId}/suspend - POST
+/api/platform/schools/{schoolId}/activate - POST
+/api/platform/schools/{schoolId}/archive - GET
+/api/platform/onboarding - POST
+/api/platform/onboarding/{requestId}/approve - POST
+/api/platform/onboarding/{requestId}/reject - GET
+/api/platform/audit-logs
+
+School: - GET/PATCH /api/school/profile - GET/POST
+/api/school/students - GET/PATCH /api/school/students/{studentId} -
+GET/POST /api/school/staff - GET/POST /api/school/wings - GET/POST
+/api/school/programmes - POST /api/school/programmes/{id}/publish -
+GET/POST /api/school/invitations - GET/POST /api/school/news - GET/POST
+/api/school/notices - GET/POST /api/school/gallery - POST
+/api/school/storage/google/connect - GET
+/api/school/storage/google/callback - POST
+/api/school/storage/disconnect
+
+For every route: - Verify authentication on server. - Resolve school
+context from trusted host. - Check membership and permissions. -
+Validate resource belongs to school. - Validate input using schemas. -
+Apply rate limits. - Use parameterized SQL. - Use idempotency keys for
+retry-prone mutations. - Write audit logs for sensitive actions. -
+Return consistent errors without leaking internals. - Never accept
+arbitrary SQL, table names or file paths from clients.
+
+Suggested error codes: UNAUTHENTICATED ACCOUNT_DISABLED TENANT_NOT_FOUND
+SCHOOL_SUSPENDED MEMBERSHIP_REQUIRED MEMBERSHIP_SUSPENDED
+PERMISSION_DENIED RESOURCE_NOT_FOUND VALIDATION_ERROR CONFLICT
+RATE_LIMITED STORAGE_NOT_CONNECTED UPLOAD_REJECTED INTERNAL_ERROR
+
+Return 404 for resources outside the user’s tenant where appropriate, so
+the API does not reveal that another tenant’s resource exists.
+
+======================================================================
+19. DATA PRIVACY AND RETENTION
+======================================================================
+
+Define a written retention policy before launch.
+
+Suggested categories: - Audit logs: retain according to security/legal
+policy. - Invitation tokens: expire quickly; purge token hashes after
+retention. - Failed job payloads: redact and purge after operational
+retention. - Student personal data: retain only while necessary and
+legally permitted. - Guardian contact data: restricted access and
+defined deletion policy. - Files: deletion must include provider-side
+deletion or access revocation. - Backups: retention schedule and secure
+deletion lifecycle. - Public content: archive history where appropriate.
+
+Support data export and deletion requests according to applicable law
+and school policy. A school leaving the platform must have a documented
+export and deletion process. Do not promise deletion from backups until
+the backup-retention window has elapsed.
+
+For minors: - Minimize collected data. - Restrict profile, guardian and
+image access. - Obtain required consent for publishing identifiable
+images. - Avoid public student directories by default. - Do not expose
+date of birth, phone or guardian details publicly.
+
+======================================================================
+20. PERFORMANCE AND SMOOTH SERVICE
+======================================================================
+
+-   Paginate large lists; never load every student/programme at once.
+-   Use cursor pagination for large or frequently changing datasets.
+-   Select only needed columns; avoid SELECT * in production APIs.
+-   Use indexes aligned with school_id and common filters.
+-   Avoid N+1 queries; batch related data.
+-   Cache only safe public content or carefully scoped authorization
+    data.
+-   Invalidate caches on content publish, role change and school status
+    change.
+-   Use background jobs for email, Drive upload, image processing and
+    exports.
+-   Set file size limits and request timeouts.
+-   Use thumbnail variants for gallery images where supported.
+-   Do not use Google Drive as a high-traffic public CDN without
+    evaluating quotas, access behavior, latency and delivery limits.
+-   Consider object storage/CDN later for high-volume public media.
+-   Monitor Turso usage, query latency, connection errors and storage.
+-   Keep database calls close to application deployment region where
+    possible.
+-   Use connection pooling/client patterns supported by the selected
+    Turso SDK and deployment runtime.
+-   Test with realistic tenant counts and large student/programme lists.
+
+======================================================================
+21. BACKUP, RECOVERY AND DEPLOYMENT
+======================================================================
+
+-   Configure automated Turso backups according to plan and verify
+    restore.
+-   Back up Google Drive content separately; Drive connection is not a
+    backup.
+-   Store encryption key backups securely with controlled access.
+-   Test restoring database and file references together.
+-   Keep development, staging and production separate.
+-   Use separate Supabase projects/credentials and Google OAuth
+    credentials for each environment.
+-   Run migrations through deployment pipeline.
+-   Test migration against a copy/staging database before production.
+-   Use expand-and-contract migrations for zero/minimal downtime
+    changes.
+-   Keep secrets in deployment secret manager.
+-   Rotate credentials when exposure is suspected.
+-   Monitor background workers and failed jobs.
+-   Provide SuperAdmin operational status for provisioning, email and
+    storage.
+
+======================================================================
+22. REQUIRED TESTS BEFORE PRODUCTION
+======================================================================
+
+AUTH: - invalid JWT rejected - expired JWT rejected - wrong
+issuer/audience rejected - disabled user rejected - Supabase user
+without application user handled safely
+
+TENANT ISOLATION: - School A cannot read School B students - School A
+cannot update School B programme - School A cannot attach School B
+file - Cross-school foreign key insertion fails - Guessing another
+tenant’s resource ID does not expose it
+
+RBAC: - Student cannot access admin endpoints - Teacher cannot access
+unassigned scope - Wing Manager cannot modify another wing - School
+Admin cannot assign platform roles - Revoked role takes effect
+promptly - Missing permission is denied
+
+ONBOARDING: - SuperAdmin school creation creates exactly one tenant -
+Public request does not create active tenant before approval - duplicate
+approval/retry does not duplicate school - failed email can be retried
+without duplicate school - invitation expires and is single-use -
+invitation cannot be used for a different email/school
+
+GOOGLE DRIVE: - invalid OAuth state rejected - token never appears in
+database/log/frontend - wrong school cannot access another school’s
+Drive file - disconnected connection blocks private file downloads -
+upload failure does not mark file active - retry does not duplicate
+provider files unnecessarily
+
+CONTENT: - draft page is not public - archived notice is not public -
+private gallery item is not publicly downloadable - unsafe HTML/script
+is sanitized
+
+RELIABILITY: - outbox retry is idempotent - worker crash recovers locked
+jobs - duplicate API request with same idempotency key does not
+duplicate action - failed jobs become visible to operators
+
+======================================================================
+23. IMPLEMENTATION ORDER
+======================================================================
+
+PHASE 1 - FOUNDATION 1. Create project and environments. 2. Configure
+Supabase Auth. 3. Create Turso database. 4. Add migration runner and
+schema_migrations. 5. Implement users and schools. 6. Implement platform
+roles/permissions. 7. Implement school memberships/roles/permissions. 8.
+Implement tenant resolution. 9. Implement auth and authorization
+middleware. 10. Implement audit_logs and outbox_events. 11. Implement
+school provisioning and onboarding. 12. Implement invitations. 13. Test
+tenant isolation and privilege boundaries.
+
+PHASE 2 - SCHOOL MANAGEMENT 1. school settings 2. school
+years/classes/sections 3. wings and teams 4. students and staff 5.
+membership administration
+
+PHASE 3 - ACTIVITIES 1. programme categories 2. programmes 3.
+judges/resources 4. registrations 5. participants 6. results 7.
+achievements
+
+PHASE 4 - CONTENT AND STORAGE 1. Google Drive OAuth 2. storage
+connections and file metadata 3. upload jobs and private download
+authorization 4. pages/news/notices 5. gallery albums/items
+
+PHASE 5 - PUBLIC WEBSITE AND STUDENT PORTAL 1. tenant-aware public pages
+2. publishing workflow 3. student portal 4. notifications and reporting
+
+Do not build all modules in one migration or one giant API route. Build
+small modules with tests and clear ownership.
+
+======================================================================
+24. FINAL DATABASE DESIGN RULES
+======================================================================
+
+1.  Supabase Auth is identity authentication, not the source of school
+    permissions.
+2.  Turso is the application database.
+3.  Google Drive stores file binaries, not application records.
+4.  Every school-owned record is tenant-scoped.
+5.  Use composite foreign keys to prevent cross-school references.
+6.  Default deny for all permissions.
+7.  Check both permission and resource scope.
+8.  Never trust role, school_id or user_id from the frontend.
+9.  Do not store plaintext tokens or secrets in Turso.
+10. Use one provisioning service for all school creation paths.
+11. Use outbox jobs for cross-service side effects.
+12. Make all retries idempotent.
+13. Audit sensitive operations.
+14. Archive historical records rather than casually deleting them.
+15. Publish content only through an explicit publishing workflow.
+16. Keep student personal data private by default.
+17. Use migrations, constraints, indexes and automated tests.
+18. Back up Turso and Drive independently.
+19. Do not claim this document is a runnable SQL migration.
+20. Before production, convert each table definition into reviewed SQL
+    migrations, test every constraint against the chosen Turso SQLite
+    version, and review the security model.
+
+======================================================================
+25. IMPORTANT IMPLEMENTATION NOTE
+======================================================================
+
+This file is a complete logical database and service blueprint, not a
+ready-to-execute SQL dump. It intentionally defines the data model,
+lifecycle, relationships and security behavior first.
+
+The next engineering deliverable should be: -
+001_platform_identity.sql - 002_tenant_rbac.sql -
+003_onboarding_invitations.sql - 004_school_structure.sql -
+005_students_staff.sql - 006_programmes_participation.sql -
+007_achievements_content.sql - 008_storage_files.sql -
+009_audit_outbox_jobs.sql - seed_platform_permissions.sql -
+seed_default_school_roles.sql - migration tests and tenant-isolation
+tests
+
+Every migration must be checked against Turso/libSQL SQLite
+compatibility. Use application-level transactions for workflows and do
+not rely on cross-provider distributed transactions.
+
+END OF FILE
