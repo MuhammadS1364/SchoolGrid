@@ -13,12 +13,22 @@ import {
   Pin,
 } from 'lucide-react';
 import { apiRequest, type PublicSchoolWebsiteData } from '../lib/api/platformApi';
+import { usePageSeo } from '../lib/seo/usePageSeo';
+import PublicFooter from '../GlobalComponents/PublicFooter';
 
 export default function PublicSchoolWebsite() {
   const { slug } = useParams<{ slug: string }>();
   const [data, setData] = useState<PublicSchoolWebsiteData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  usePageSeo({
+    title: data?.school?.name ? `${data.school.name} | SchoolGrid Portal` : 'School Portal | SchoolGrid',
+    description:
+      data?.school?.about_summary ||
+      'Official public institutional portal powered by SchoolGrid featuring wings, programmes, achievements, notices, and campus news.',
+    path: slug ? `/s/${slug}` : '/schools',
+  });
 
   useEffect(() => {
     if (!slug) return;
@@ -295,6 +305,8 @@ export default function PublicSchoolWebsite() {
           </section>
         </div>
       </main>
+
+      <PublicFooter />
     </div>
   );
 }

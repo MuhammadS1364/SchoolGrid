@@ -11,6 +11,8 @@ import {
 } from '../lib/SupaBaseClient/SupaBaseClientFunction';
 import { isGmailAddress, resolveUserRoleAccess } from '../lib/auth/roleResolver';
 import { useAuth } from '../lib/auth/AuthContext';
+import { usePageSeo } from '../lib/seo/usePageSeo';
+import PublicFooter from '../GlobalComponents/PublicFooter';
 
 const wait = (ms: number): Promise<void> =>
   new Promise((resolve) => {
@@ -18,6 +20,13 @@ const wait = (ms: number): Promise<void> =>
   });
 
 export const GetWay: FC = () => {
+  usePageSeo({
+    title: 'SchoolGrid — Multi-School Management & Institutional Portals',
+    description:
+      'One Platform. Multiple Schools. Unified Management. Manage wings, classes, teachers, students, notices, and public school portals in one multi-tenant system.',
+    path: '/',
+  });
+
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const {
@@ -414,9 +423,14 @@ export const GetWay: FC = () => {
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-8 px-6 py-4">
           <Link
             to="/"
-            className="text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0"
+            className="inline-flex items-center gap-2.5 text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0"
           >
-            SchoolGrid
+            <img
+              src="/logo.png"
+              alt="SchoolGrid logo"
+              className="h-9 w-auto object-contain"
+            />
+            <span>SchoolGrid</span>
           </Link>
           <nav
             aria-label="Primary"
@@ -799,6 +813,8 @@ export const GetWay: FC = () => {
           )}
         </motion.div>
       </main>
+
+      <PublicFooter />
     </div>
   );
 };

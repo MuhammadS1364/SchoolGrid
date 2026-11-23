@@ -17,6 +17,10 @@ import {
   provisionSchoolTransactionally,
   validateSchoolSlug,
 } from '../services/schoolProvisioning';
+import {
+  validateFileUploadMetadata,
+  validateSafeExternalUrl,
+} from '../middleware/security';
 
 export interface ApiRouterOptions {
   tokenVerifier?: TokenVerifier;
@@ -828,6 +832,14 @@ export function createApiRouter(client: Client, options: ApiRouterOptions = {}):
       const now = new Date().toISOString();
       const d = parsed.data;
 
+      if (d.websiteUrl) {
+        const urlCheck = validateSafeExternalUrl(d.websiteUrl);
+        if (!urlCheck.valid) {
+          sendError(res, 400, 'INVALID_WEBSITE_URL', urlCheck.reason);
+          return;
+        }
+      }
+
       await client.execute({
         sql: `UPDATE schools
               SET name = COALESCE(?, name),
@@ -1399,6 +1411,24 @@ export function createApiRouter(client: Client, options: ApiRouterOptions = {}):
         const msg = err instanceof Error ? err.message : 'Unable to create invitation.';
         sendError(res, 400, 'INVITATION_CREATE_FAILED', msg);
       }
+    }
+  );
+
+  router.post(
+    '/school/:schoolId/files/validate',
+    requireAuth,
+    requireSchoolPermission('storage.manage'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      const check = validateFileUploadMetadata({
+        fileName: String(req.body?.fileName ?? ''),
+        mimeType: String(req.body?.mimeType ?? ''),
+        sizeBytes: Number(req.body?.sizeBytes ?? 0),
+      });
+      if (!check.valid) {
+        sendError(res, 400, 'INVALID_FILE_UPLOAD', check.reason);
+        return;
+      }
+      res.json({ success: true, data: { safeFileName: check.safeFileName } });
     }
   );
 

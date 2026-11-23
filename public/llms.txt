@@ -1,0 +1,25 @@
+# SchoolGrid — Multi-School Institutional Activity & Management Platform
+
+> One Platform. Multiple Schools. Unified Management.
+> SchoolGrid is a multi-tenant institutional SaaS platform enabling K-12 and senior secondary schools to manage academic wings, classes, faculty, students, programmes, achievements, notices, and public school websites with tenant-isolated data security.
+
+## Primary Public URLs
+- [Home & Sign-In](https://ms-school-grid.vercel.app/): Role-based login for SuperAdmin, School Admins, Teachers, and Students via Email/Password and Google OAuth.
+- [Public Schools Directory](https://ms-school-grid.vercel.app/schools): Browse active institutions registered on SchoolGrid and visit their public portals.
+- [Institutional Plans & Services](https://ms-school-grid.vercel.app/services): Compare transparent monthly, quarterly, and annual service plans with feature entitlements.
+- [Register Your School](https://ms-school-grid.vercel.app/register-school): Submit a new institutional onboarding request for SuperAdmin review and atomic workspace provisioning.
+- [Privacy Policy](https://ms-school-grid.vercel.app/privacy): Data privacy, Google OAuth & Google Drive handling, and student record protection standards.
+- [Terms of Service](https://ms-school-grid.vercel.app/terms): Platform usage guidelines for schools, administrators, teachers, and students.
+
+## Sample Public Institutional Portal
+- [Greenwood International Academy](https://ms-school-grid.vercel.app/s/greenwood-academy): Live example of a school-owned public website showcasing active wings, public programmes, achievements, campus news, and official notices.
+
+## Core Capabilities
+- **Multi-Tenant Isolation**: Each school operates inside its own scoped workspace with composite tenant foreign keys and server-side RBAC.
+- **Institutional Wings & Programmes**: Organize STEM, Cultural, Sports, and Club wings with draft-to-public publishing controls.
+- **Real-Time Operations & Storage**: Live updates across classes, teachers, students, notices, and per-school Google Drive document linking.
+- **Security & Governance**: Supabase Auth identity verification, Turso/libSQL multi-tenant database, hashed single-use invitations, and append-only audit logs.
+
+## Contact
+- Website: https://ms-school-grid.vercel.app
+- Support & Institutional Inquiries: shafeealam1364@gmail.com

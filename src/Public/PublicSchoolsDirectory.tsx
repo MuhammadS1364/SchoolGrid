@@ -2,8 +2,16 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowRight, Building2, Calendar, Layers, MapPin, Search } from 'lucide-react';
 import { apiRequest, type PublicSchoolSummary } from '../lib/api/platformApi';
+import { usePageSeo } from '../lib/seo/usePageSeo';
+import PublicFooter from '../GlobalComponents/PublicFooter';
 
 export default function PublicSchoolsDirectory() {
+  usePageSeo({
+    title: 'Schools Directory | SchoolGrid',
+    description:
+      'Browse active schools and institutional portals running on SchoolGrid with public wings, programmes, notices, and campus news.',
+    path: '/schools',
+  });
   const [schools, setSchools] = useState<PublicSchoolSummary[]>([]);
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
@@ -46,8 +54,16 @@ export default function PublicSchoolsDirectory() {
     <div className="min-h-dvh bg-slate-50 flex flex-col">
       <header className="w-full border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-6 px-6 py-4">
-          <Link to="/" className="text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap">
-            SchoolGrid
+          <Link
+            to="/"
+            className="inline-flex items-center gap-2.5 text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap"
+          >
+            <img
+              src="/logo.png"
+              alt="SchoolGrid logo"
+              className="h-9 w-auto object-contain"
+            />
+            <span>SchoolGrid</span>
           </Link>
           <nav aria-label="Primary" className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
             <Link to="/schools" className="text-slate-900 font-semibold">
@@ -187,6 +203,8 @@ export default function PublicSchoolsDirectory() {
           </div>
         )}
       </main>
+
+      <PublicFooter />
     </div>
   );
 }

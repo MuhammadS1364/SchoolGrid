@@ -11,6 +11,8 @@ import PublicSchoolsDirectory from './Public/PublicSchoolsDirectory';
 import PublicSchoolWebsite from './Public/PublicSchoolWebsite';
 import PublicSchoolRegistrationPage from './Public/PublicSchoolRegistrationPage';
 import AcceptInvitationPage from './Public/AcceptInvitationPage';
+import PrivacyPolicyPage from './Public/PrivacyPolicyPage';
+import TermsOfServicePage from './Public/TermsOfServicePage';
 
 import SuperAdminDashBoard from './SuperAdmin/SuperAdminDashBoard/SuperAdminDashBoard';
 import SuperAdminBoard from './SuperAdmin/SuperAdminDashBoard/SuperAdminBoard';
@@ -48,6 +50,8 @@ export default function App() {
         <Route path="/register-school" element={<PublicSchoolRegistrationPage />} />
         <Route path="/register-school/:holderId" element={<SchoolOnboardingPage />} />
         <Route path="/accept-invitation" element={<AcceptInvitationPage />} />
+        <Route path="/privacy" element={<PrivacyPolicyPage />} />
+        <Route path="/terms" element={<TermsOfServicePage />} />
 
         {/* SuperAdmin Console */}
         <Route path="/super-admin-dashboard" element={<SuperAdminDashBoard />}>

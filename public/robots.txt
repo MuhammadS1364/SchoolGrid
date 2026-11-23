@@ -1,0 +1,18 @@
+User-agent: *
+Allow: /
+Allow: /schools
+Allow: /s/
+Allow: /services
+Allow: /register-school
+Allow: /privacy
+Allow: /terms
+
+Disallow: /super-admin-dashboard
+Disallow: /school-dashboard
+Disallow: /teacher-dashboard
+Disallow: /student-dashboard
+Disallow: /auth/callback
+Disallow: /accept-invitation
+Disallow: /api/
+
+Sitemap: https://ms-school-grid.vercel.app/sitemap.xml
