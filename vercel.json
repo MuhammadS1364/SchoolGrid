@@ -12,7 +12,7 @@
   ],
   "rewrites": [
     {
-      "source": "/((?!api/|robots\\.txt|sitemap\\.xml|llms\\.txt|favicon\\.svg|logo\\.png|og-image\\.jpg|assets/).*)",
+      "source": "/((?!api/|robots\\.txt|sitemap\\.xml|llms\\.txt|googled29c73cffdbe41ae\\.html|favicon\\.svg|logo\\.png|og-image\\.jpg|assets/).*)",
       "destination": "/index.html"
     }
   ]
