@@ -7,8 +7,8 @@ import {
   BookOpen,
   CheckCircle2,
   Clock,
-  HardDrive,
-  FileSpreadsheet,
+  ShieldCheck,
+  Database,
   ArrowRight,
   Package,
 } from 'lucide-react';
@@ -26,17 +26,22 @@ import SupaBaseClientFunction, {
   formatSupabaseError,
 } from '../../lib/SupaBaseClient/SupaBaseClientFunction';
 import type {
-  SchoolClassRecord,
   SchoolRecord,
-  SchoolStudentRecord,
   SchoolTeacherRecord,
+  SchoolUserProfileRecord,
   ServiceHolderRecord,
   ServicePlanRecord,
+  StudentsBoxRecord,
 } from '../../lib/SupaBaseClient/mockSupabase';
-import { listAllSchoolRecords } from '../../lib/services/schoolDirectoryStore';
+import { isMissingTableError, listAllSchoolRecords } from '../../lib/services/schoolDirectoryStore';
+import {
+  fetchTursoSchoolClasses,
+  type TursoSchoolClass,
+} from '../../lib/services/tursoSchoolData';
 import { applyRealtimeChange, useRealtimeTables } from '../../lib/realtime/useRealtimeTable';
 
 type Icon = ComponentType<{ className?: string }>;
+type DbTab = 'schools' | 'users' | 'teachers' | 'students' | 'classes';
 
 interface StatCardProps {
   title: string;
@@ -122,11 +127,13 @@ function formatTimestamp(iso: string | null | undefined): string {
 
 export default function Dashboard() {
   const [schools, setSchools] = useState<SchoolRecord[]>([]);
+  const [users, setUsers] = useState<SchoolUserProfileRecord[]>([]);
   const [plans, setPlans] = useState<ServicePlanRecord[]>([]);
   const [holders, setHolders] = useState<ServiceHolderRecord[]>([]);
   const [teachers, setTeachers] = useState<SchoolTeacherRecord[]>([]);
-  const [students, setStudents] = useState<SchoolStudentRecord[]>([]);
-  const [classes, setClasses] = useState<SchoolClassRecord[]>([]);
+  const [students, setStudents] = useState<StudentsBoxRecord[]>([]);
+  const [classes, setClasses] = useState<TursoSchoolClass[]>([]);
+  const [activeDbTab, setActiveDbTab] = useState<DbTab>('schools');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -135,28 +142,37 @@ export default function Dashboard() {
     setError(null);
     const supabase = SupaBaseClientFunction();
     try {
-      const [schoolsRes, plansRes, holdersRes, teachersRes, studentsRes, classesRes] =
-        await Promise.all([
-          supabase.from('OurSchools').select('*').order('created_at', { ascending: false }),
-          supabase.from('OurServicesBook').select('*').order('service_charge', { ascending: true }),
-          supabase.from('OurServiceHolder').select('*').order('created_at', { ascending: false }),
-          listAllSchoolRecords<SchoolTeacherRecord>('SchoolTeachers'),
-          listAllSchoolRecords<SchoolStudentRecord>('SchoolStudents'),
-          listAllSchoolRecords<SchoolClassRecord>('SchoolClasses'),
-        ]);
+      const [
+        schoolsRes,
+        usersRes,
+        plansRes,
+        holdersRes,
+        teachersRes,
+        studentsRes,
+        tursoClasses,
+      ] = await Promise.all([
+        supabase.from('OurSchools').select('*').order('created_at', { ascending: false }),
+        supabase.from('school_user_info').select('*').order('created_at', { ascending: false }),
+        supabase.from('OurServicesBook').select('*').order('service_charge', { ascending: true }),
+        supabase.from('OurServiceHolder').select('*').order('created_at', { ascending: false }),
+        listAllSchoolRecords<SchoolTeacherRecord>('SchoolTeachers'),
+        listAllSchoolRecords<StudentsBoxRecord>('StudentsBox'),
+        fetchTursoSchoolClasses({}),
+      ]);
 
-      if (schoolsRes.error) throw schoolsRes.error;
-      if (plansRes.error) throw plansRes.error;
-      if (holdersRes.error) throw holdersRes.error;
+      if (schoolsRes.error && !isMissingTableError(schoolsRes.error)) throw schoolsRes.error;
 
       setSchools((schoolsRes.data as SchoolRecord[]) ?? []);
-      setPlans((plansRes.data as ServicePlanRecord[]) ?? []);
-      setHolders((holdersRes.data as ServiceHolderRecord[]) ?? []);
+      setUsers(
+        usersRes.error ? [] : ((usersRes.data as unknown as SchoolUserProfileRecord[]) ?? [])
+      );
+      setPlans(plansRes.error ? [] : ((plansRes.data as ServicePlanRecord[]) ?? []));
+      setHolders(holdersRes.error ? [] : ((holdersRes.data as ServiceHolderRecord[]) ?? []));
       setTeachers(teachersRes.data);
       setStudents(studentsRes.data);
-      setClasses(classesRes.data);
+      setClasses(tursoClasses);
     } catch (err: unknown) {
-      setError(formatSupabaseError(err, 'Failed to load real-time dashboard metrics.'));
+      setError(formatSupabaseError(err, 'Failed to load full platform database metrics.'));
     } finally {
       if (showSpinner) setLoading(false);
     }
@@ -166,7 +182,7 @@ export default function Dashboard() {
     void loadDashboardData(true);
   }, [loadDashboardData]);
 
-  // Real-time postgres_changes subscriptions across all 6 core tables
+  // Real-time subscriptions across core platform tables
   useRealtimeTables(
     'superadmin-dashboard-overview',
     [
@@ -174,6 +190,13 @@ export default function Dashboard() {
         table: 'OurSchools',
         onChange: (payload) =>
           setSchools((prev) => applyRealtimeChange<SchoolRecord>(prev, payload, 'school_id')),
+      },
+      {
+        table: 'school_user_info',
+        onChange: (payload) =>
+          setUsers((prev) =>
+            applyRealtimeChange<SchoolUserProfileRecord>(prev, payload, 'profile_uuid')
+          ),
       },
       {
         table: 'OurServicesBook',
@@ -199,19 +222,17 @@ export default function Dashboard() {
           ),
       },
       {
-        table: 'SchoolStudents',
+        table: 'StudentsBox',
         onChange: (payload) =>
-          setStudents((prev) =>
-            applyRealtimeChange<SchoolStudentRecord>(prev, payload, 'student_id')
-          ),
-      },
-      {
-        table: 'SchoolClasses',
-        onChange: (payload) =>
-          setClasses((prev) => applyRealtimeChange<SchoolClassRecord>(prev, payload, 'class_id')),
+          setStudents((prev) => applyRealtimeChange<StudentsBoxRecord>(prev, payload, 'AddNo')),
       },
     ],
     { onResync: () => void loadDashboardData(false) }
+  );
+
+  const schoolLookup = useMemo(
+    () => new Map(schools.map((s) => [s.school_id, s])),
+    [schools]
   );
 
   const metrics = useMemo(() => {
@@ -219,24 +240,22 @@ export default function Dashboard() {
     const pendingSchools = schools.length - approvedSchools;
     const activePlans = plans.filter((p) => p.is_active !== false).length;
     const pendingHolders = holders.filter((h) => h.status === 'pending_approval').length;
-    const gdriveSchools = schools.filter((s) => s.is_gdrive_allowed).length;
-    const importExportSchools = schools.filter((s) => s.is_import_export_allowed).length;
-    const activeStudents = students.filter((s) => s.is_active !== false).length;
+    const activeUsers = users.filter((u) => u.is_active !== false).length;
+    const activeStudents = students.filter((s) => s.IsActive !== false).length;
     const activeTeachers = teachers.filter((t) => t.is_active !== false).length;
-    const totalClassSlots = classes.length || schools.reduce((sum, s) => sum + Number(s.total_class ?? 0), 0);
+    const totalClassSlots = classes.length;
 
     return {
       approvedSchools,
       pendingSchools,
       activePlans,
       pendingHolders,
-      gdriveSchools,
-      importExportSchools,
+      activeUsers,
       activeStudents,
       activeTeachers,
       totalClassSlots,
     };
-  }, [schools, plans, holders, students, teachers, classes]);
+  }, [schools, plans, holders, users, students, teachers, classes]);
 
   const primaryStats: StatCardProps[] = [
     {
@@ -246,32 +265,32 @@ export default function Dashboard() {
       icon: Building2,
     },
     {
-      title: 'Total Students',
+      title: 'Total Students (StudentsBox)',
       value: students.length.toLocaleString(),
-      caption: `${metrics.activeStudents} active across campuses`,
+      caption: `${metrics.activeStudents} active across all schools`,
       icon: Users,
     },
     {
       title: 'Teachers & Staff',
       value: teachers.length.toLocaleString(),
-      caption: `${metrics.activeTeachers} active faculty members`,
+      caption: `${metrics.activeTeachers} active in SchoolTeachers`,
       icon: GraduationCap,
     },
     {
-      title: 'Classes Configured',
+      title: 'Turso Classes',
       value: metrics.totalClassSlots.toLocaleString(),
-      caption: `${classes.length} directory classes · ${metrics.activePlans} active plans`,
+      caption: 'Synced from Turso SchoolClasses',
       icon: BookOpen,
     },
   ];
 
   const secondaryStats: StatCardProps[] = [
     {
-      title: 'Pending Plan Approvals',
-      value: metrics.pendingHolders.toLocaleString(),
-      caption: `${holders.length} total service requests`,
-      icon: Clock,
-      tone: 'orange',
+      title: 'Portal Users (school_user_info)',
+      value: users.length.toLocaleString(),
+      caption: `${metrics.activeUsers} active accounts across all roles`,
+      icon: ShieldCheck,
+      tone: 'blue',
     },
     {
       title: 'Approved Schools',
@@ -281,17 +300,17 @@ export default function Dashboard() {
       tone: 'green',
     },
     {
-      title: 'Google Drive Enabled',
-      value: metrics.gdriveSchools.toLocaleString(),
-      caption: 'SuperAdmin Drive flag ON',
-      icon: HardDrive,
-      tone: 'blue',
+      title: 'Pending Plan Approvals',
+      value: metrics.pendingHolders.toLocaleString(),
+      caption: `${holders.length} total service requests`,
+      icon: Clock,
+      tone: 'orange',
     },
     {
-      title: 'Import / Export Enabled',
-      value: metrics.importExportSchools.toLocaleString(),
-      caption: 'CSV & spreadsheet tools ON',
-      icon: FileSpreadsheet,
+      title: 'Active Database Tables',
+      value: '5 Core',
+      caption: 'OurSchools · Users · Teachers · StudentsBox · Turso',
+      icon: Database,
       tone: 'purple',
     },
   ];
@@ -315,10 +334,9 @@ export default function Dashboard() {
 
   const recentActivities = useMemo<ActivityItem[]>(() => {
     const planLookup = new Map(plans.map((p) => [p.service_id, p.service_title]));
-    const schoolLookup = new Map(schools.map((s) => [s.school_id, s.school_title]));
     const items: ActivityItem[] = [];
 
-    holders.slice(0, 6).forEach((h) => {
+    holders.slice(0, 4).forEach((h) => {
       const planName = (h.service_id && planLookup.get(h.service_id)) || 'Service Plan';
       const statusLabel =
         h.status === 'pending_approval'
@@ -334,7 +352,9 @@ export default function Dashboard() {
         avatarClass: 'bg-amber-600',
         content: (
           <>
-            <span className="font-medium text-slate-900">{h.holder_fullname || h.holder_email || 'Applicant'}</span>{' '}
+            <span className="font-medium text-slate-900">
+              {h.holder_fullname || h.holder_email || 'Applicant'}
+            </span>{' '}
             <span className="text-slate-500">requested</span>{' '}
             <span className="font-medium text-slate-900">{planName}</span>
           </>
@@ -369,40 +389,43 @@ export default function Dashboard() {
       });
     });
 
-    students.slice(0, 4).forEach((st) => {
+    teachers.slice(0, 4).forEach((t) => {
       items.push({
-        id: `student-${st.student_id}`,
-        initials: getInitials(st.full_name, 'ST'),
+        id: `teacher-${t.teacher_id}`,
+        initials: getInitials(t.teacher_full_name || t.full_name, 'TR'),
         avatarClass: 'bg-emerald-600',
         content: (
           <>
-            <span className="font-medium text-slate-900">{st.full_name}</span>{' '}
-            <span className="text-slate-500">enrolled in</span>{' '}
             <span className="font-medium text-slate-900">
-              {st.class_name} ({schoolLookup.get(st.school_id) || 'School'})
+              {t.teacher_full_name || t.full_name}
+            </span>{' '}
+            <span className="text-slate-500">joined</span>{' '}
+            <span className="font-medium text-slate-900">
+              {schoolLookup.get(t.school_id)?.school_title || t.school_id}
             </span>
           </>
         ),
-        createdAt: st.created_at,
-        badge: { label: 'Student', variant: 'muted' },
+        createdAt: t.created_at,
+        badge: { label: 'Teacher', variant: 'muted' },
       });
     });
 
     return items
       .sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')))
       .slice(0, 6);
-  }, [holders, schools, students, plans]);
+  }, [holders, schools, teachers, plans, schoolLookup]);
 
   return (
     <div className="min-h-full bg-slate-50/40">
-      <div className="p-6">
+      <div className="p-6 space-y-6">
         <div className="flex flex-col gap-3 border-b border-slate-200 pb-4 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h1 className="text-3xl font-bold tracking-tight text-slate-900">
-              SuperAdmin Dashboard
+              SuperAdmin Full Database
             </h1>
             <p className="mt-1 text-sm text-slate-500">
-              Real-time overview across schools, service subscriptions, students, and faculty.
+              Platform-wide governance across all schools, users, teachers, StudentsBox records, and
+              Turso classes.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -424,28 +447,28 @@ export default function Dashboard() {
         </div>
 
         {error && (
-          <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+          <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
             {error}
           </div>
         )}
 
         {loading ? (
-          <div className="mt-6 text-sm text-slate-500">Loading dashboard metrics...</div>
+          <div className="text-sm text-slate-500">Loading full database metrics...</div>
         ) : (
           <>
-            <div className="mt-6 grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-4">
               {primaryStats.map((s) => (
                 <StatCard key={s.title} {...s} />
               ))}
             </div>
 
-            <div className="mt-5 grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-4">
               {secondaryStats.map((s) => (
                 <StatCard key={s.title} {...s} />
               ))}
             </div>
 
-            <div className="mt-6 grid grid-cols-1 gap-5 xl:grid-cols-3">
+            <div className="grid grid-cols-1 gap-5 xl:grid-cols-3">
               <div className="xl:col-span-2">
                 <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
                   <h2 className="text-base font-semibold text-slate-900">
@@ -509,14 +532,11 @@ export default function Dashboard() {
               <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
                 <h2 className="text-base font-semibold text-slate-900">Recent Activity</h2>
                 <p className="mt-1 text-sm text-slate-500">
-                  Live updates across subscriptions, schools, and enrollments
+                  Live updates across schools, teachers, and service holders
                 </p>
 
                 {recentActivities.length === 0 ? (
-                  <p className="mt-6 text-sm text-slate-500">
-                    No activity recorded yet. Changes to service holders, schools, and students
-                    appear automatically.
-                  </p>
+                  <p className="mt-6 text-sm text-slate-500">No activity recorded yet.</p>
                 ) : (
                   <ul className="mt-6 space-y-5">
                     {recentActivities.map((a) => (
@@ -539,6 +559,236 @@ export default function Dashboard() {
                 )}
               </section>
             </div>
+
+            {/* Full Platform Database Explorer (All Tables) */}
+            <section className="rounded-xl border border-slate-200 bg-white overflow-hidden shadow-sm">
+              <div className="flex flex-col gap-3 border-b border-slate-200 px-6 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h2 className="text-base font-bold text-slate-900">Full Database Explorer</h2>
+                  <p className="text-xs text-slate-500">
+                    SuperAdmin view across every table in Supabase &amp; Turso
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {(
+                    [
+                      { id: 'schools', label: `OurSchools (${schools.length})` },
+                      { id: 'users', label: `school_user_info (${users.length})` },
+                      { id: 'teachers', label: `SchoolTeachers (${teachers.length})` },
+                      { id: 'students', label: `StudentsBox (${students.length})` },
+                      { id: 'classes', label: `Turso Classes (${classes.length})` },
+                    ] as Array<{ id: DbTab; label: string }>
+                  ).map((tab) => (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setActiveDbTab(tab.id)}
+                      className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors cursor-pointer ${
+                        activeDbTab === tab.id
+                          ? 'bg-slate-900 text-white'
+                          : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                      }`}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                {activeDbTab === 'schools' && (
+                  <table className="min-w-full divide-y divide-slate-100 text-left text-xs">
+                    <thead className="bg-slate-50 font-semibold text-slate-500">
+                      <tr>
+                        <th className="px-4 py-3">School Title</th>
+                        <th className="px-4 py-3">Manager</th>
+                        <th className="px-4 py-3">Email</th>
+                        <th className="px-4 py-3">Location</th>
+                        <th className="px-4 py-3">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {schools.map((s) => (
+                        <tr key={s.school_id} className="hover:bg-slate-50/70">
+                          <td className="px-4 py-3 font-semibold text-slate-900">
+                            {s.school_title}
+                          </td>
+                          <td className="px-4 py-3 text-slate-600">{s.school_manager || '—'}</td>
+                          <td className="px-4 py-3 text-slate-600">{s.schoole_gmail || '—'}</td>
+                          <td className="px-4 py-3 text-slate-600">
+                            {[s.loc_district, s.loc_state].filter(Boolean).join(', ') || '—'}
+                          </td>
+                          <td className="px-4 py-3 font-semibold">
+                            <span className={s.is_approved ? 'text-emerald-700' : 'text-amber-700'}>
+                              {s.is_approved ? 'Approved' : 'Pending'}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+
+                {activeDbTab === 'users' && (
+                  <table className="min-w-full divide-y divide-slate-100 text-left text-xs">
+                    <thead className="bg-slate-50 font-semibold text-slate-500">
+                      <tr>
+                        <th className="px-4 py-3">Full Name</th>
+                        <th className="px-4 py-3">Role</th>
+                        <th className="px-4 py-3">Auth User UUID</th>
+                        <th className="px-4 py-3">Active</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {users.map((u) => (
+                        <tr key={u.profile_uuid} className="hover:bg-slate-50/70">
+                          <td className="px-4 py-3 font-semibold text-slate-900">
+                            {u.full_name || '—'}
+                          </td>
+                          <td className="px-4 py-3 font-mono font-semibold text-indigo-700">
+                            {u.user_role || '—'}
+                          </td>
+                          <td className="px-4 py-3 font-mono text-slate-600">
+                            {u.user_uuid || '—'}
+                          </td>
+                          <td className="px-4 py-3 font-semibold">
+                            <span
+                              className={
+                                u.is_active !== false ? 'text-emerald-700' : 'text-rose-600'
+                              }
+                            >
+                              {u.is_active !== false ? 'Active' : 'Inactive'}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+
+                {activeDbTab === 'teachers' && (
+                  <table className="min-w-full divide-y divide-slate-100 text-left text-xs">
+                    <thead className="bg-slate-50 font-semibold text-slate-500">
+                      <tr>
+                        <th className="px-4 py-3">Teacher</th>
+                        <th className="px-4 py-3">Email</th>
+                        <th className="px-4 py-3">School</th>
+                        <th className="px-4 py-3">Auth User ID</th>
+                        <th className="px-4 py-3 text-right">Wage</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {teachers.map((t) => (
+                        <tr key={t.teacher_id} className="hover:bg-slate-50/70">
+                          <td className="px-4 py-3 font-semibold text-slate-900">
+                            {t.teacher_full_name || t.full_name}
+                          </td>
+                          <td className="px-4 py-3 text-slate-600">
+                            {t.teacher_email || t.email || '—'}
+                          </td>
+                          <td className="px-4 py-3 text-slate-700">
+                            {schoolLookup.get(t.school_id)?.school_title || t.school_id}
+                          </td>
+                          <td className="px-4 py-3 font-mono text-slate-500">
+                            {t.user_id ? `${t.user_id.slice(0, 12)}...` : '—'}
+                          </td>
+                          <td className="px-4 py-3 text-right font-mono text-slate-700 tabular-nums">
+                            ₹{Number(t.monthly_wage ?? 5500).toLocaleString()}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+
+                {activeDbTab === 'students' && (
+                  <table className="min-w-full divide-y divide-slate-100 text-left text-xs">
+                    <thead className="bg-slate-50 font-semibold text-slate-500">
+                      <tr>
+                        <th className="px-4 py-3">AddNo</th>
+                        <th className="px-4 py-3">Student</th>
+                        <th className="px-4 py-3">School</th>
+                        <th className="px-4 py-3">Location</th>
+                        <th className="px-4 py-3 text-right">Grand Points</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {students.map((st) => (
+                        <tr key={st.AddNo} className="hover:bg-slate-50/70">
+                          <td className="px-4 py-3 font-mono font-semibold text-indigo-700">
+                            {st.AddNo}
+                          </td>
+                          <td className="px-4 py-3">
+                            <p className="font-semibold text-slate-900">{st.StudentName || '—'}</p>
+                            <p className="text-[11px] text-slate-500">{st.StudentEmail || '—'}</p>
+                          </td>
+                          <td className="px-4 py-3 text-slate-700">
+                            {(st.school_id && schoolLookup.get(st.school_id)?.school_title) ||
+                              st.school_id ||
+                              '—'}
+                          </td>
+                          <td className="px-4 py-3 text-slate-600">
+                            {[st.StnDistrict, st.StnState].filter(Boolean).join(', ') || '—'}
+                          </td>
+                          <td className="px-4 py-3 text-right font-mono font-semibold text-slate-900 tabular-nums">
+                            {st.Grand_Total_Points ?? 0}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+
+                {activeDbTab === 'classes' && (
+                  <table className="min-w-full divide-y divide-slate-100 text-left text-xs">
+                    <thead className="bg-slate-50 font-semibold text-slate-500">
+                      <tr>
+                        <th className="px-4 py-3">Class Title</th>
+                        <th className="px-4 py-3">Sub Title</th>
+                        <th className="px-4 py-3">School</th>
+                        <th className="px-4 py-3 text-right">Students</th>
+                        <th className="px-4 py-3">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {classes.length === 0 ? (
+                        <tr>
+                          <td colSpan={5} className="px-4 py-6 text-center text-slate-500">
+                            No classes stored in Turso SchoolClasses yet.
+                          </td>
+                        </tr>
+                      ) : (
+                        classes.map((c) => (
+                          <tr key={c.class_id} className="hover:bg-slate-50/70">
+                            <td className="px-4 py-3 font-semibold text-slate-900">
+                              {c.class_title}
+                            </td>
+                            <td className="px-4 py-3 font-mono text-slate-600">{c.sub_title}</td>
+                            <td className="px-4 py-3 text-slate-700">
+                              {(c.school_id && schoolLookup.get(c.school_id)?.school_title) ||
+                                c.school_id ||
+                                '—'}
+                            </td>
+                            <td className="px-4 py-3 text-right font-mono text-slate-700 tabular-nums">
+                              {c.total_students}
+                            </td>
+                            <td className="px-4 py-3 font-semibold">
+                              <span
+                                className={
+                                  c.is_active === 1 ? 'text-emerald-700' : 'text-slate-400'
+                                }
+                              >
+                                {c.is_active === 1 ? 'Active' : 'Inactive'}
+                              </span>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </section>
           </>
         )}
       </div>

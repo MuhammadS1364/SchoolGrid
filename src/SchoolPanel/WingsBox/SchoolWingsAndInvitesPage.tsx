@@ -24,7 +24,7 @@ interface InviteRow {
 
 export default function SchoolWingsAndInvitesPage() {
   const { school } = useActiveSchool();
-  const [tursoSchoolId, setTursoSchoolId] = useState<string>('sch_greenwood_001');
+  const [tursoSchoolId, setTursoSchoolId] = useState<string>('');
   const [wings, setWings] = useState<WingRow[]>([]);
   const [invites, setInvites] = useState<InviteRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -41,19 +41,22 @@ export default function SchoolWingsAndInvitesPage() {
   const [copied, setCopied] = useState(false);
 
   const loadData = useCallback(async () => {
+    if (!school) return;
     setLoading(true);
     setError(null);
+    let resolvedSlug: string | null = null;
     try {
-      // Resolve matching Turso school ID from public directory or auth memberships
       const publicSchools = await apiRequest<Array<{ id: string; name: string; slug: string }>>(
         '/api/public/schools',
         { requireAuth: false }
       );
+      const normalizedTitle = school.school_title.trim().toLowerCase();
       const matched =
-        publicSchools.find(
-          (s) => school?.school_title && s.name.toLowerCase().includes(school.school_title.toLowerCase().split(' ')[0])
-        ) ?? publicSchools[0];
-      const activeId = matched?.id ?? 'sch_greenwood_001';
+        publicSchools.find((s) => s.id === school.school_id) ??
+        publicSchools.find((s) => s.name.trim().toLowerCase() === normalizedTitle) ??
+        null;
+      const activeId = matched?.id ?? school.school_id;
+      resolvedSlug = matched?.slug ?? null;
       setTursoSchoolId(activeId);
 
       const [wingsData, invitesData] = await Promise.all([
@@ -66,14 +69,18 @@ export default function SchoolWingsAndInvitesPage() {
     } catch (err) {
       if (err instanceof ApiRequestError && (err.status === 401 || err.status === 403 || err.status === 404)) {
         setAuthRequired(true);
-        // Load public wings read-only so users still see institutional structure
-        try {
-          const pub = await apiRequest<{ wings: WingRow[] }>('/api/public/schools/greenwood-academy', {
-            requireAuth: false,
-          });
-          setWings(pub.wings.map((w) => ({ ...w, status: 'active' })));
-        } catch {
-          // Ignore fallback
+        if (resolvedSlug) {
+          try {
+            const pub = await apiRequest<{ wings: WingRow[] }>(
+              `/api/public/schools/${encodeURIComponent(resolvedSlug)}`,
+              { requireAuth: false }
+            );
+            setWings(pub.wings.map((w) => ({ ...w, status: 'active' })));
+          } catch {
+            setWings([]);
+          }
+        } else {
+          setWings([]);
         }
       } else {
         setError(err instanceof Error ? err.message : 'Unable to load school wings.');
@@ -81,7 +88,7 @@ export default function SchoolWingsAndInvitesPage() {
     } finally {
       setLoading(false);
     }
-  }, [school?.school_title]);
+  }, [school]);
 
   useEffect(() => {
     void loadData();

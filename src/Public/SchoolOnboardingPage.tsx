@@ -9,8 +9,13 @@ import type {
   ServiceHolderRecord,
   ServicePlanRecord,
 } from '../lib/SupaBaseClient/mockSupabase';
-import { isGmailAddress, ROLES } from '../lib/auth/roleResolver';
+import { isGmailAddress } from '../lib/auth/roleResolver';
+import {
+  buildSchoolAndInfoPayloads,
+  provisionSupabaseAccountAndProfile,
+} from '../lib/auth/userProvisioning';
 import { deriveEntitlementsFromFeatureList } from '../lib/services/planEntitlements';
+import { saveTursoSchoolInfo } from '../lib/services/tursoSchoolData';
 import { useRealtimeTables } from '../lib/realtime/useRealtimeTable';
 
 export default function SchoolOnboardingPage() {
@@ -45,6 +50,10 @@ export default function SchoolOnboardingPage() {
   const [youtubLink, setYoutubLink] = useState('');
   const [instaLink, setInstaLink] = useState('');
   const [facebookLink, setFacebookLink] = useState('');
+  const [logoUrl, setLogoUrl] = useState('');
+  const [aboutSchool, setAboutSchool] = useState('');
+  const [schoolVission, setSchoolVission] = useState('');
+  const [schoolMission, setSchoolMission] = useState('');
 
   useEffect(() => {
     let active = true;
@@ -136,8 +145,8 @@ export default function SchoolOnboardingPage() {
       return;
     }
 
-    if (!emailIsGmail && schoolPassword.trim().length < 6) {
-      setError('Non-Gmail school accounts require a password of at least 6 characters.');
+    if (schoolPassword.trim().length < 6) {
+      setError('Please set an account password of at least 6 characters.');
       return;
     }
 
@@ -145,56 +154,51 @@ export default function SchoolOnboardingPage() {
     try {
       const supabase = SupaBaseClientFunction();
 
-      // Create auth user for non-Gmail school login; Gmail schools sign in via Google OAuth on /login
-      let userUuid: string | null = null;
-      if (!emailIsGmail) {
-        const { data: signUpData, error: signUpErr } = await supabase.auth.signUp({
-          email: schoolGmail.trim(),
-          password: schoolPassword,
-          options: {
-            data: {
-              role: ROLES.SCHOOL,
-              full_name: schoolManager.trim() || schoolTitle.trim(),
-            },
-          },
-        });
-        if (signUpErr) {
-          const msg = signUpErr.message.toLowerCase();
-          if (!msg.includes('already registered') && !msg.includes('already exists')) {
-            throw signUpErr;
-          }
-        } else {
-          userUuid = signUpData.user?.id ?? null;
-        }
-      }
+      // 1. Create auth.users account + public.school_user_info row (user_role = 'School')
+      const provisioned = await provisionSupabaseAccountAndProfile({
+        email: schoolGmail.trim(),
+        password: schoolPassword,
+        fullName: schoolManager.trim() || schoolTitle.trim(),
+        role: 'School',
+      });
+
+      const { ourSchoolsRow, buildSchoolInfoRow } = buildSchoolAndInfoPayloads({
+        school_title: schoolTitle,
+        school_manager: schoolManager,
+        is_private: isPrivate,
+        loc_state: locState,
+        loc_district: locDistrict,
+        loc_city_village: locCityVillage,
+        local_address: localAddress,
+        user_uuid: provisioned.user_uuid,
+        schoole_gmail: schoolGmail,
+        school_type: schoolType,
+        is_approved: holder.status === 'approved',
+        logo_url: logoUrl,
+        total_class: Number(totalClass) || 5,
+        primery_class_fee: Number(primeryFee) || 550,
+        seconday_class_fee: Number(secondaryFee) || 750,
+        insta_id_link: instaLink,
+        facebook_link: facebookLink,
+        youtube_link: youtubLink,
+        is_computer_lab: isComputerLab,
+        is_library: isLibrary,
+        about_school: aboutSchool,
+        school_vission: schoolVission,
+        school_mission: schoolMission,
+      });
 
       const schoolPayload = {
-        school_title: schoolTitle.trim(),
-        school_manager: schoolManager.trim() || null,
-        is_private: isPrivate,
-        loc_state: locState.trim() || null,
-        loc_district: locDistrict.trim() || null,
-        loc_city_village: locCityVillage.trim() || null,
-        local_address: localAddress.trim() || null,
-        user_uuid: userUuid,
-        school_type: schoolType,
-        schoole_gmail: schoolGmail.trim(),
+        ...ourSchoolsRow,
         // Read-only entitlements inherited from approved plan (SuperAdmin controlled)
         is_gdrive_allowed: promisedFeatures.is_gdrive_allowed,
         is_import_export_allowed: promisedFeatures.is_import_export_allowed,
         allowed_count_wing: promisedFeatures.allowed_count_wing,
         is_email_service: promisedFeatures.is_email_service,
         is_collaburation_allowed: promisedFeatures.is_collaburation_allowed,
-        primery_fee: Number(primeryFee) || 450,
-        secondary_fee: Number(secondaryFee) || 550,
-        senior_secondary_fee: Number(seniorSecondaryFee) || 750,
-        youtub_link: youtubLink.trim() || null,
-        insta_link: instaLink.trim() || null,
-        facebook_link: facebookLink.trim() || null,
-        total_class: Number(totalClass) || 0,
-        is_computer_lab: isComputerLab,
-        is_library: isLibrary,
-        is_approved: true,
+        primery_fee: Number(primeryFee) || 550,
+        secondary_fee: Number(secondaryFee) || 750,
+        senior_secondary_fee: Number(seniorSecondaryFee) || 950,
       };
 
       const { data: createdSchools, error: schoolErr } = await supabase
@@ -206,6 +210,22 @@ export default function SchoolOnboardingPage() {
       const createdSchool = createdSchools?.[0] as SchoolRecord | undefined;
 
       if (createdSchool) {
+        // 2. Save companion SchoolInfo record to Turso linked by school_id
+        const infoRow = buildSchoolInfoRow(createdSchool.school_id);
+        await saveTursoSchoolInfo(createdSchool.school_id, {
+          total_class: infoRow.total_class,
+          primery_class_fee: infoRow.primery_class_fee,
+          seconday_class_fee: infoRow.seconday_class_fee,
+          insta_id_link: infoRow.insta_id_link,
+          facebook_link: infoRow.facebook_link,
+          youtube_link: infoRow.youtube_link,
+          is_computer_lab: infoRow.is_computer_lab ? 1 : 0,
+          is_library: infoRow.is_library ? 1 : 0,
+          about_school: infoRow.about_school,
+          school_vission: infoRow.school_vission,
+          school_mission: infoRow.school_mission,
+        });
+
         await supabase
           .from('OurServiceHolder')
           .update({
@@ -214,22 +234,6 @@ export default function SchoolOnboardingPage() {
           })
           .eq('holder_id', holder.holder_id)
           .select();
-
-        if (userUuid) {
-          try {
-            await supabase.from('school_user_profile').insert([
-              {
-                user_uuid: userUuid,
-                full_name: schoolManager.trim() || schoolTitle.trim(),
-                school_id: createdSchool.school_id,
-                user_role: ROLES.SCHOOL,
-                is_active: true,
-              },
-            ]);
-          } catch {
-            // Do not block onboarding if profile row already exists or RLS restricts anon inserts
-          }
-        }
 
         try {
           window.localStorage.setItem('schoolgrid_active_school_id', createdSchool.school_id);
@@ -465,15 +469,38 @@ export default function SchoolOnboardingPage() {
                     htmlFor="school_password"
                     className="mb-1 block text-xs font-semibold text-slate-700"
                   >
-                    Account Password {emailIsGmail ? '(Optional for Gmail)' : '*'}
+                    Account Password *
                   </label>
                   <input
                     id="school_password"
                     type="password"
-                    required={!emailIsGmail}
+                    required
+                    minLength={6}
                     value={schoolPassword}
                     onChange={(e) => setSchoolPassword(e.target.value)}
-                    placeholder={emailIsGmail ? 'Google Auth handles sign-in' : 'Min. 6 characters'}
+                    placeholder="Min. 6 characters (creates auth.users + school_user_info)"
+                    className="w-full rounded-lg border border-slate-200 px-3.5 py-2.5 text-sm text-slate-900 focus:border-indigo-500 focus:outline-none"
+                  />
+                  {emailIsGmail && (
+                    <p className="mt-1 text-xs text-slate-500">
+                      Also supports Google Sign-In &amp; public Google Drive folder uploads.
+                    </p>
+                  )}
+                </div>
+
+                <div className="sm:col-span-2">
+                  <label
+                    htmlFor="logo_url"
+                    className="mb-1 block text-xs font-semibold text-slate-700"
+                  >
+                    School Logo URL (optional — Google Drive public link)
+                  </label>
+                  <input
+                    id="logo_url"
+                    type="url"
+                    value={logoUrl}
+                    onChange={(e) => setLogoUrl(e.target.value)}
+                    placeholder="https://drive.google.com/uc?export=view&id=..."
                     className="w-full rounded-lg border border-slate-200 px-3.5 py-2.5 text-sm text-slate-900 focus:border-indigo-500 focus:outline-none"
                   />
                 </div>
@@ -685,6 +712,57 @@ export default function SchoolOnboardingPage() {
                     value={facebookLink}
                     onChange={(e) => setFacebookLink(e.target.value)}
                     placeholder="https://facebook.com/..."
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-3 pt-1">
+                <div>
+                  <label
+                    htmlFor="about_school"
+                    className="mb-1 block text-xs font-semibold text-slate-700"
+                  >
+                    About School
+                  </label>
+                  <input
+                    id="about_school"
+                    type="text"
+                    value={aboutSchool}
+                    onChange={(e) => setAboutSchool(e.target.value)}
+                    placeholder="Short overview of your campus"
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                  />
+                </div>
+                <div>
+                  <label
+                    htmlFor="school_vission"
+                    className="mb-1 block text-xs font-semibold text-slate-700"
+                  >
+                    School Vision
+                  </label>
+                  <input
+                    id="school_vission"
+                    type="text"
+                    value={schoolVission}
+                    onChange={(e) => setSchoolVission(e.target.value)}
+                    placeholder="Long-term educational vision"
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                  />
+                </div>
+                <div>
+                  <label
+                    htmlFor="school_mission"
+                    className="mb-1 block text-xs font-semibold text-slate-700"
+                  >
+                    School Mission
+                  </label>
+                  <input
+                    id="school_mission"
+                    type="text"
+                    value={schoolMission}
+                    onChange={(e) => setSchoolMission(e.target.value)}
+                    placeholder="Core institutional mission"
                     className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
                   />
                 </div>

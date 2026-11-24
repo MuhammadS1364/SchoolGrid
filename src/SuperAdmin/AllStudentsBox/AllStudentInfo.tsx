@@ -5,13 +5,13 @@ import SupaBaseClientFunction, {
 } from '../../lib/SupaBaseClient/SupaBaseClientFunction';
 import type {
   SchoolRecord,
-  SchoolStudentRecord,
+  StudentsBoxRecord,
 } from '../../lib/SupaBaseClient/mockSupabase';
 import { listAllSchoolRecords } from '../../lib/services/schoolDirectoryStore';
 import { applyRealtimeChange, useRealtimeTables } from '../../lib/realtime/useRealtimeTable';
 
 export default function AllStudentsInfo() {
-  const [students, setStudents] = useState<SchoolStudentRecord[]>([]);
+  const [students, setStudents] = useState<StudentsBoxRecord[]>([]);
   const [schools, setSchools] = useState<SchoolRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -20,7 +20,7 @@ export default function AllStudentsInfo() {
   const [selectedState, setSelectedState] = useState('ALL');
   const [selectedDistrict, setSelectedDistrict] = useState('ALL');
   const [selectedSchoolId, setSelectedSchoolId] = useState('ALL');
-  const [selectedTier, setSelectedTier] = useState('ALL');
+  const [selectedStatus, setSelectedStatus] = useState<'ALL' | 'ACTIVE' | 'INACTIVE'>('ALL');
 
   const loadDirectory = useCallback(async (showSpinner = false) => {
     if (showSpinner) setLoading(true);
@@ -28,7 +28,7 @@ export default function AllStudentsInfo() {
     const supabase = SupaBaseClientFunction();
     try {
       const [studentsRes, schoolsRes] = await Promise.all([
-        listAllSchoolRecords<SchoolStudentRecord>('SchoolStudents'),
+        listAllSchoolRecords<StudentsBoxRecord>('StudentsBox'),
         supabase.from('OurSchools').select('*').order('school_title', { ascending: true }),
       ]);
       if (schoolsRes.error) throw schoolsRes.error;
@@ -50,11 +50,9 @@ export default function AllStudentsInfo() {
     'superadmin-all-students',
     [
       {
-        table: 'SchoolStudents',
+        table: 'StudentsBox',
         onChange: (payload) =>
-          setStudents((prev) =>
-            applyRealtimeChange<SchoolStudentRecord>(prev, payload, 'student_id')
-          ),
+          setStudents((prev) => applyRealtimeChange<StudentsBoxRecord>(prev, payload, 'AddNo')),
       },
       {
         table: 'OurSchools',
@@ -75,8 +73,11 @@ export default function AllStudentsInfo() {
     schools.forEach((s) => {
       if (s.loc_state?.trim()) set.add(s.loc_state.trim());
     });
+    students.forEach((st) => {
+      if (st.StnState?.trim()) set.add(st.StnState.trim());
+    });
     return Array.from(set).sort();
-  }, [schools]);
+  }, [schools, students]);
 
   const districtOptions = useMemo(() => {
     const set = new Set<string>();
@@ -84,8 +85,12 @@ export default function AllStudentsInfo() {
       if (selectedState !== 'ALL' && s.loc_state?.trim() !== selectedState) return;
       if (s.loc_district?.trim()) set.add(s.loc_district.trim());
     });
+    students.forEach((st) => {
+      if (selectedState !== 'ALL' && st.StnState?.trim() !== selectedState) return;
+      if (st.StnDistrict?.trim()) set.add(st.StnDistrict.trim());
+    });
     return Array.from(set).sort();
-  }, [schools, selectedState]);
+  }, [schools, students, selectedState]);
 
   const schoolOptions = useMemo(() => {
     return schools.filter((s) => {
@@ -98,22 +103,24 @@ export default function AllStudentsInfo() {
   const filteredStudents = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return students.filter((st) => {
-      const school = schoolMap.get(st.school_id);
-      if (selectedState !== 'ALL' && school?.loc_state?.trim() !== selectedState) return false;
-      if (selectedDistrict !== 'ALL' && school?.loc_district?.trim() !== selectedDistrict) {
-        return false;
-      }
+      const school = st.school_id ? schoolMap.get(st.school_id) : undefined;
+      const stState = (school?.loc_state || st.StnState || '').trim();
+      const stDistrict = (school?.loc_district || st.StnDistrict || '').trim();
+
+      if (selectedState !== 'ALL' && stState !== selectedState) return false;
+      if (selectedDistrict !== 'ALL' && stDistrict !== selectedDistrict) return false;
       if (selectedSchoolId !== 'ALL' && st.school_id !== selectedSchoolId) return false;
-      if (selectedTier !== 'ALL' && st.fee_tier !== selectedTier) return false;
+      if (selectedStatus === 'ACTIVE' && st.IsActive === false) return false;
+      if (selectedStatus === 'INACTIVE' && st.IsActive !== false) return false;
 
       if (!q) return true;
       return [
-        st.full_name,
-        st.email,
-        st.roll_number,
-        st.class_name,
-        st.wing,
-        st.guardian_contact,
+        st.AddNo,
+        st.StudentName,
+        st.StudentEmail,
+        st.FatherName,
+        st.StnDistrict,
+        st.StnState,
         school?.school_title,
         school?.loc_city_village,
       ].some((v) => String(v ?? '').toLowerCase().includes(q));
@@ -125,7 +132,7 @@ export default function AllStudentsInfo() {
     selectedState,
     selectedDistrict,
     selectedSchoolId,
-    selectedTier,
+    selectedStatus,
   ]);
 
   const handleReset = () => {
@@ -133,14 +140,16 @@ export default function AllStudentsInfo() {
     setSelectedState('ALL');
     setSelectedDistrict('ALL');
     setSelectedSchoolId('ALL');
-    setSelectedTier('ALL');
+    setSelectedStatus('ALL');
   };
 
   return (
     <div className="mx-auto max-w-6xl space-y-6 p-4 sm:p-6">
       <div className="flex flex-col gap-3 border-b border-slate-200 pb-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900">All Students</h1>
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900">
+            All Students (StudentsBox)
+          </h1>
           <p className="mt-1 text-sm text-slate-500 tabular-nums">
             Showing {filteredStudents.length} of {students.length} students across {schools.length}{' '}
             schools
@@ -175,7 +184,7 @@ export default function AllStudentsInfo() {
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Name, roll number, email, class, school, or village..."
+              placeholder="AddNo, student name, father name, email, or school..."
               className="w-full rounded-lg border border-slate-200 py-2 pl-9 pr-3 text-sm focus:border-indigo-500 focus:outline-none"
             />
           </div>
@@ -252,18 +261,18 @@ export default function AllStudentsInfo() {
         </div>
 
         <div className="flex flex-wrap items-center gap-1 sm:col-span-2 lg:col-span-5">
-          {(['ALL', 'Primary', 'Secondary', 'Senior Secondary'] as const).map((tier) => (
+          {(['ALL', 'ACTIVE', 'INACTIVE'] as const).map((status) => (
             <button
-              key={tier}
+              key={status}
               type="button"
-              onClick={() => setSelectedTier(tier)}
+              onClick={() => setSelectedStatus(status)}
               className={`rounded-md px-3 py-1 text-xs font-medium transition-colors cursor-pointer ${
-                selectedTier === tier
+                selectedStatus === status
                   ? 'bg-slate-900 text-white'
                   : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
               }`}
             >
-              {tier === 'ALL' ? 'All Fee Tiers' : tier}
+              {status === 'ALL' ? 'All Students' : status === 'ACTIVE' ? 'Active' : 'Inactive'}
             </button>
           ))}
         </div>
@@ -278,54 +287,58 @@ export default function AllStudentsInfo() {
             <Users className="mx-auto h-8 w-8 text-slate-300" />
             <p className="mt-2 text-sm font-medium text-slate-700">No students found</p>
             <p className="mt-1 text-xs text-slate-500">
-              Students added from any School Dashboard appear here automatically.
+              Students enrolled in <code className="font-mono">StudentsBox</code> from any School
+              Dashboard appear here automatically.
             </p>
           </div>
         ) : (
           <table className="min-w-full divide-y divide-slate-200 text-left text-sm">
             <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
               <tr>
+                <th className="px-4 py-3">AddNo</th>
                 <th className="px-4 py-3">Student</th>
-                <th className="px-4 py-3">Roll No</th>
+                <th className="px-4 py-3">Father Name</th>
                 <th className="px-4 py-3">School &amp; Location</th>
-                <th className="px-4 py-3">Class / Wing</th>
-                <th className="px-4 py-3">Tier</th>
-                <th className="px-4 py-3">Guardian</th>
+                <th className="px-4 py-3 text-right">Grand Points</th>
+                <th className="px-4 py-3">Status</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filteredStudents.map((st) => {
-                const school = schoolMap.get(st.school_id);
+                const school = st.school_id ? schoolMap.get(st.school_id) : undefined;
                 return (
-                  <tr key={st.student_id} className="hover:bg-slate-50/70">
+                  <tr key={st.AddNo} className="hover:bg-slate-50/70">
+                    <td className="px-4 py-3 font-mono text-xs font-semibold text-indigo-700 tabular-nums">
+                      {st.AddNo}
+                    </td>
                     <td className="px-4 py-3">
-                      <p className="font-semibold text-slate-900">{st.full_name}</p>
-                      <p className="text-xs text-slate-500">{st.email}</p>
+                      <p className="font-semibold text-slate-900">{st.StudentName || '—'}</p>
+                      <p className="text-xs text-slate-500">{st.StudentEmail || '—'}</p>
                     </td>
-                    <td className="px-4 py-3 font-mono text-xs text-slate-700 tabular-nums">
-                      {st.roll_number}
-                    </td>
+                    <td className="px-4 py-3 text-slate-700">{st.FatherName || '—'}</td>
                     <td className="px-4 py-3">
                       <p className="font-medium text-slate-800">
-                        {school?.school_title || st.school_id}
+                        {school?.school_title || st.school_id || 'Unassigned'}
                       </p>
                       <p className="text-xs text-slate-500">
-                        {[school?.loc_city_village, school?.loc_district, school?.loc_state]
+                        {[
+                          school?.loc_city_village,
+                          school?.loc_district || st.StnDistrict,
+                          school?.loc_state || st.StnState,
+                        ]
                           .filter(Boolean)
                           .join(', ') || '—'}
                       </p>
                     </td>
-                    <td className="px-4 py-3 text-slate-700">
-                      <p className="font-medium">{st.class_name}</p>
-                      <p className="text-xs text-slate-500">{st.wing}</p>
+                    <td className="px-4 py-3 text-right font-mono text-xs font-semibold text-slate-900 tabular-nums">
+                      {st.Grand_Total_Points ?? 0} pts
                     </td>
-                    <td className="px-4 py-3">
-                      <span className="rounded-md bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">
-                        {st.fee_tier}
+                    <td className="px-4 py-3 text-xs font-semibold">
+                      <span
+                        className={st.IsActive !== false ? 'text-emerald-700' : 'text-slate-400'}
+                      >
+                        {st.IsActive !== false ? 'Active' : 'Inactive'}
                       </span>
-                    </td>
-                    <td className="px-4 py-3 font-mono text-xs text-slate-600 tabular-nums">
-                      {st.guardian_contact || '—'}
                     </td>
                   </tr>
                 );

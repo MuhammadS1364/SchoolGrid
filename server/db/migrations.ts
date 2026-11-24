@@ -569,6 +569,44 @@ export const MIGRATIONS: MigrationSpec[] = [
       )`,
     ],
   },
+  {
+    version: '006',
+    name: 'turso_school_info_and_classes',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS \`SchoolInfo\` (
+        \`school_info_id\` text PRIMARY KEY DEFAULT (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))),2) || '-' || substr('89ab',abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))),2) || '-' || lower(hex(randomblob(6)))),
+        \`created_at\` text DEFAULT (strftime('%d %m %Y %H:%M:%S', 'now', '+5 hours', '+30 minutes')) NOT NULL,
+        \`school_id\` text,
+        \`total_class\` integer DEFAULT 5,
+        \`primery_class_fee\` integer DEFAULT 550,
+        \`seconday_class_fee\` integer DEFAULT 750,
+        \`insta_id_link\` text,
+        \`facebook_link\` text,
+        \`youtube_link\` text,
+        \`is_computer_lab\` integer DEFAULT 0,
+        \`is_library\` integer DEFAULT 0,
+        \`about_school\` text,
+        \`school_vission\` text,
+        \`school_mission\` text,
+        CONSTRAINT "SchoolInfo_check_1" CHECK(is_computer_lab IN (0, 1)),
+        CONSTRAINT "SchoolInfo_check_2" CHECK(is_library IN (0, 1))
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_turso_schoolinfo_school_id ON \`SchoolInfo\`(\`school_id\`)`,
+      `CREATE TABLE IF NOT EXISTS \`SchoolClasses\` (
+        \`class_id\` text PRIMARY KEY DEFAULT (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))),2) || '-' || substr('89ab',abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))),2) || '-' || lower(hex(randomblob(6)))),
+        \`created_at\` text DEFAULT (strftime('%d %m %Y %H:%M:%S', 'now', '+5 hours', '+30 minutes')) NOT NULL,
+        \`school_id\` text,
+        \`class_title\` text DEFAULT 'Seconday First Year',
+        \`class_teacher_id\` text,
+        \`total_students\` integer DEFAULT 0,
+        \`sub_title\` text DEFAULT 'U1',
+        \`is_active\` integer DEFAULT 1,
+        CONSTRAINT "SchoolClasses_check_3" CHECK(is_active IN (0, 1))
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_turso_schoolclasses_school_id ON \`SchoolClasses\`(\`school_id\`)`,
+      `CREATE INDEX IF NOT EXISTS idx_turso_schoolclasses_teacher_id ON \`SchoolClasses\`(\`class_teacher_id\`)`,
+    ],
+  },
 ];
 
 export const PLATFORM_ROLES = [

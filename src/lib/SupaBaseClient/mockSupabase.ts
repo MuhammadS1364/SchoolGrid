@@ -60,12 +60,40 @@ export interface SchoolRecord {
   is_computer_lab: boolean;
   is_library: boolean;
   is_approved: boolean;
+  logo_url?: string | null;
+}
+
+export interface SchoolInfoRecord {
+  school_info_id: string;
+  created_at: string;
+  school_id: string | null;
+  total_class: number | null;
+  primery_class_fee: number | null;
+  seconday_class_fee: number | null;
+  insta_id_link: string | null;
+  facebook_link: string | null;
+  youtube_link: string | null;
+  is_computer_lab: boolean | null;
+  is_library: boolean | null;
+  about_school: string | null;
+  school_vission: string | null;
+  school_mission: string | null;
 }
 
 export interface SchoolTeacherRecord {
   teacher_id: string;
   created_at: string;
   school_id: string;
+  user_id?: string | null;
+  class_id?: string | null;
+  teacher_full_name?: string | null;
+  teacher_contact?: string | null;
+  teacher_email?: string | null;
+  monthly_wage?: number | null;
+  joined_at?: string | null;
+  left_at?: string | null;
+  teacher_img?: string | null;
+  // Backwards-compatible aliases used by existing views
   full_name: string;
   email: string;
   subject: string;
@@ -74,10 +102,35 @@ export interface SchoolTeacherRecord {
   is_active: boolean;
 }
 
+export interface StudentsBoxRecord {
+  AddNo: string;
+  StudentName: string | null;
+  StudentEmail: string | null;
+  FatherName: string | null;
+  school_id: string | null;
+  stn_user_id: string | null;
+  Registration_Count: number | null;
+  Resluted_Count: number | null;
+  Total_Point: number | null;
+  OutReach_Count: number | null;
+  OutReach_Points: number | null;
+  Achievements_Counts: number | null;
+  Achievements_Points: number | null;
+  Grand_Total_Points: number | null;
+  IsActive: boolean | null;
+  Student_Photo_Urls: string | null;
+  StnState: string | null;
+  StnDistrict: string | null;
+  Stn_Class: string | null;
+  Stn_Dob: string | null;
+}
+
 export interface SchoolStudentRecord {
   student_id: string;
   created_at: string;
   school_id: string;
+  stn_user_id?: string | null;
+  AddNo?: string;
   full_name: string;
   email: string;
   roll_number: string;
@@ -85,6 +138,11 @@ export interface SchoolStudentRecord {
   wing: string;
   fee_tier: 'Primary' | 'Secondary' | 'Senior Secondary';
   guardian_contact: string;
+  father_name?: string | null;
+  state?: string | null;
+  district?: string | null;
+  dob?: string | null;
+  photo_url?: string | null;
   is_active: boolean;
 }
 
@@ -515,12 +573,16 @@ export const DEFAULT_USER_PROFILES: SchoolUserProfileRecord[] = [
 
 const PRIMARY_KEY_BY_TABLE: Record<string, string> = {
   OurSchools: 'school_id',
+  SchoolInfo: 'school_info_id',
   OurServicesBook: 'service_id',
   OurServiceHolder: 'holder_id',
   SchoolTeachers: 'teacher_id',
   SchoolStudents: 'student_id',
+  StudentsBox: 'AddNo',
   SchoolClasses: 'class_id',
   school_user_profile: 'profile_uuid',
+  school_user_info: 'profile_uuid',
+  school_drive_files: 'id',
 };
 
 function generateId(prefix: string): string {
@@ -558,10 +620,70 @@ function createSeedTables(initialSchools?: SchoolRecord[]): Record<string, Recor
     OurServicesBook: DEFAULT_SERVICES.map((s) => ({ ...s })),
     OurServiceHolder: DEFAULT_SERVICE_HOLDERS.map((h) => ({ ...h })),
     OurSchools: (initialSchools ?? DEFAULT_SCHOOLS).map((s) => ({ ...s })),
-    SchoolTeachers: DEFAULT_TEACHERS.map((t) => ({ ...t })),
+    SchoolInfo: [
+      {
+        school_info_id: 'sinfo-101',
+        created_at: '2025-01-12T08:30:00.000Z',
+        school_id: 'sch-101',
+        total_class: 24,
+        primery_class_fee: 450,
+        seconday_class_fee: 550,
+        insta_id_link: 'https://instagram.com/greenwoodacademy',
+        facebook_link: 'https://facebook.com/greenwoodacademy',
+        youtube_link: 'https://youtube.com/@greenwoodacademy',
+        is_computer_lab: true,
+        is_library: true,
+        about_school: 'Greenwood International Academy — unified campus management and wings.',
+        school_vission: 'Empowering every learner through structured innovation.',
+        school_mission: 'Delivering inclusive academic excellence and leadership.',
+      },
+    ],
+    SchoolTeachers: DEFAULT_TEACHERS.map((t, idx) => ({
+      ...t,
+      user_id: `00000000-0000-4000-8000-00000000020${idx + 1}`,
+      teacher_full_name: t.full_name,
+      teacher_email: t.email,
+      teacher_contact: t.phone,
+      monthly_wage: 5500,
+      joined_at: '2025-02-01',
+      left_at: null,
+      teacher_img: null,
+    })),
     SchoolStudents: DEFAULT_STUDENTS.map((s) => ({ ...s })),
+    StudentsBox: DEFAULT_STUDENTS.map((s, idx) => ({
+      AddNo: s.roll_number,
+      StudentName: s.full_name,
+      StudentEmail: s.email,
+      FatherName: 'Mr. Guardian',
+      school_id: s.school_id,
+      stn_user_id: `00000000-0000-4000-8000-00000000030${idx + 1}`,
+      Registration_Count: 1,
+      Resluted_Count: 1,
+      Total_Point: 85,
+      OutReach_Count: 0,
+      OutReach_Points: 0,
+      Achievements_Counts: 1,
+      Achievements_Points: 15,
+      Grand_Total_Points: 100,
+      IsActive: s.is_active,
+      Student_Photo_Urls: null,
+      StnState: 'Maharashtra',
+      StnDistrict: 'Pune',
+      Stn_Class: null,
+      Stn_Dob: '2011-05-14',
+    })),
     SchoolClasses: DEFAULT_CLASSES.map((c) => ({ ...c })),
     school_user_profile: DEFAULT_USER_PROFILES.map((p) => ({ ...p })),
+    school_user_info: DEFAULT_USER_PROFILES.map((p) => ({
+      profile_uuid: p.profile_uuid,
+      created_at: p.created_at,
+      user_uuid: p.user_uuid,
+      full_name: p.full_name,
+      user_password: null,
+      user_role: p.user_role,
+      is_active: p.is_active,
+    })),
+    school_drive_files: [],
   };
 }
 
@@ -853,6 +975,7 @@ export function createMockSupabaseClient(initialSchools?: SchoolRecord[]) {
         select(_columns?: string) {
           const filters: Array<(row: Record<string, unknown>) => boolean> = [];
           let orderBy: { column: string; ascending: boolean } | null = null;
+          let limitCount: number | null = null;
           let singleMode: 'none' | 'maybeSingle' | 'single' = 'none';
 
           const execute = async () => {
@@ -869,6 +992,9 @@ export function createMockSupabaseClient(initialSchools?: SchoolRecord[]) {
                 const bv = String(rawB ?? '');
                 return ascending ? av.localeCompare(bv) : bv.localeCompare(av);
               });
+            }
+            if (limitCount !== null) {
+              rows = rows.slice(0, limitCount);
             }
             const cloned = rows.map((r) => ({ ...r }));
             if (singleMode === 'maybeSingle') {
@@ -888,8 +1014,17 @@ export function createMockSupabaseClient(initialSchools?: SchoolRecord[]) {
               filters.push((row) => row[col] === val);
               return builder;
             },
+            in(col: string, values: unknown[]) {
+              const allowed = new Set(values);
+              filters.push((row) => allowed.has(row[col]));
+              return builder;
+            },
             order(column: string, opts?: { ascending?: boolean }) {
               orderBy = { column, ascending: opts?.ascending ?? true };
+              return builder;
+            },
+            limit(count: number) {
+              limitCount = Math.max(0, count);
               return builder;
             },
             maybeSingle() {

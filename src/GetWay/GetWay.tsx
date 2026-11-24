@@ -448,18 +448,22 @@ export const GetWay: FC = () => {
             >
               Plans &amp; Services
             </Link>
-            <Link
-              to="/super-admin-dashboard"
-              className="hover:text-slate-900 transition-colors whitespace-nowrap shrink-0"
-            >
-              SuperAdmin
-            </Link>
-            <Link
-              to="/school-dashboard"
-              className="hover:text-slate-900 transition-colors whitespace-nowrap shrink-0"
-            >
-              School Panel
-            </Link>
+            {(!user || activeRole === 'SuperAdmin') && (
+              <Link
+                to="/super-admin-dashboard"
+                className="hover:text-slate-900 transition-colors whitespace-nowrap shrink-0"
+              >
+                SuperAdmin
+              </Link>
+            )}
+            {(!user || activeRole === 'SuperAdmin' || activeRole === 'School') && (
+              <Link
+                to="/school-dashboard"
+                className="hover:text-slate-900 transition-colors whitespace-nowrap shrink-0"
+              >
+                School Panel
+              </Link>
+            )}
           </nav>
           <div className="shrink-0">
             <Link

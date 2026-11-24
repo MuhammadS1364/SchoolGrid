@@ -7,6 +7,14 @@ import SupaBaseClientFunction, {
 } from '../../lib/SupaBaseClient/SupaBaseClientFunction';
 import type { SchoolRecord } from '../../lib/SupaBaseClient/mockSupabase';
 import { applyRealtimeChange, useRealtimeTables } from '../../lib/realtime/useRealtimeTable';
+import {
+  buildSchoolAndInfoPayloads,
+  PROVISIONABLE_ROLES,
+  provisionSupabaseAccountAndProfile,
+  type ProvisionableRole,
+} from '../../lib/auth/userProvisioning';
+import { isSafeHttpUrl } from '../../lib/GooglDrive/GoogleDrive';
+import { saveTursoSchoolInfo } from '../../lib/services/tursoSchoolData';
 
 const INACTIVE_STORAGE_KEY = 'our_schools_inactive_ids_v1';
 
@@ -15,6 +23,8 @@ interface SchoolFormData {
   school_manager: string;
   school_type: string;
   schoole_gmail: string;
+  account_password: string;
+  logo_url: string;
   is_private: boolean;
   is_active: boolean;
   is_approved: boolean;
@@ -32,11 +42,22 @@ interface SchoolFormData {
   youtub_link: string;
   insta_link: string;
   facebook_link: string;
+  about_school: string;
+  school_vission: string;
+  school_mission: string;
   loc_state: string;
   loc_district: string;
   loc_city_village: string;
   local_address: string;
   user_uuid: string;
+}
+
+interface NewUserFormData {
+  full_name: string;
+  email: string;
+  password: string;
+  user_role: ProvisionableRole;
+  school_id: string;
 }
 
 interface MessageBoxState {
@@ -59,6 +80,8 @@ const EMPTY_FORM: SchoolFormData = {
   school_manager: '',
   school_type: 'Senior Secondary',
   schoole_gmail: '',
+  account_password: '',
+  logo_url: '',
   is_private: true,
   is_active: true,
   is_approved: true,
@@ -67,20 +90,31 @@ const EMPTY_FORM: SchoolFormData = {
   allowed_count_wing: 7,
   is_email_service: false,
   is_collaburation_allowed: false,
-  primery_fee: 450,
-  secondary_fee: 550,
-  senior_secondary_fee: 750,
-  total_class: 0,
+  primery_fee: 550,
+  secondary_fee: 750,
+  senior_secondary_fee: 950,
+  total_class: 5,
   is_computer_lab: false,
   is_library: false,
   youtub_link: '',
   insta_link: '',
   facebook_link: '',
+  about_school: '',
+  school_vission: '',
+  school_mission: '',
   loc_state: '',
   loc_district: '',
   loc_city_village: '',
   local_address: '',
   user_uuid: '',
+};
+
+const EMPTY_USER_FORM: NewUserFormData = {
+  full_name: '',
+  email: '',
+  password: '',
+  user_role: 'SuperAdmin',
+  school_id: '',
 };
 
 type FeatureFlagKey =
@@ -126,6 +160,11 @@ export default function AllSchoolsInfo() {
   const [editingSchool, setEditingSchool] = useState<SchoolRecord | null>(null);
   const [formData, setFormData] = useState<SchoolFormData>(EMPTY_FORM);
   const [saving, setSaving] = useState<boolean>(false);
+
+  // SuperAdmin Create User (auth.users + school_user_info) modal state
+  const [userModalOpen, setUserModalOpen] = useState<boolean>(false);
+  const [userForm, setUserForm] = useState<NewUserFormData>(EMPTY_USER_FORM);
+  const [creatingUser, setCreatingUser] = useState<boolean>(false);
 
   const showMessageBox = (type: MessageBoxState['type'], title: string, text: string) => {
     setMsgBox({ id: Date.now(), type, title, text });
@@ -271,6 +310,7 @@ export default function AllSchoolsInfo() {
       const active = !inactiveIds.includes(school.school_id);
       if (statusFilter === 'ACTIVE' && !active) return false;
       if (statusFilter === 'INACTIVE' && active) return false;
+      if (statusFilter === 'PENDING' && Boolean(school.is_approved)) return false;
 
       if (!q) return true;
       const searchableFields = [
@@ -375,6 +415,8 @@ export default function AllSchoolsInfo() {
       school_manager: school.school_manager || '',
       school_type: school.school_type || 'Senior Secondary',
       schoole_gmail: school.schoole_gmail || '',
+      account_password: '',
+      logo_url: school.logo_url || '',
       is_private: Boolean(school.is_private),
       is_active: isSchoolActive(school),
       is_approved: Boolean(school.is_approved),
@@ -383,15 +425,18 @@ export default function AllSchoolsInfo() {
       allowed_count_wing: Number(school.allowed_count_wing ?? 7),
       is_email_service: Boolean(school.is_email_service),
       is_collaburation_allowed: Boolean(school.is_collaburation_allowed),
-      primery_fee: Number(school.primery_fee ?? 450),
-      secondary_fee: Number(school.secondary_fee ?? 550),
-      senior_secondary_fee: Number(school.senior_secondary_fee ?? 750),
-      total_class: Number(school.total_class ?? 0),
+      primery_fee: Number(school.primery_fee ?? 550),
+      secondary_fee: Number(school.secondary_fee ?? 750),
+      senior_secondary_fee: Number(school.senior_secondary_fee ?? 950),
+      total_class: Number(school.total_class ?? 5),
       is_computer_lab: Boolean(school.is_computer_lab),
       is_library: Boolean(school.is_library),
       youtub_link: school.youtub_link || '',
       insta_link: school.insta_link || '',
       facebook_link: school.facebook_link || '',
+      about_school: '',
+      school_vission: '',
+      school_mission: '',
       loc_state: school.loc_state || '',
       loc_district: school.loc_district || '',
       loc_city_village: school.loc_city_village || '',
@@ -415,42 +460,62 @@ export default function AllSchoolsInfo() {
       return;
     }
 
+    if (!editingSchool) {
+      if (!formData.schoole_gmail.trim()) {
+        showMessageBox(
+          'error',
+          'Validation Error',
+          'School email (schoole_gmail) is required to create the school auth account.'
+        );
+        return;
+      }
+      if (formData.account_password.length < 6) {
+        showMessageBox(
+          'error',
+          'Validation Error',
+          'Account password must be at least 6 characters long.'
+        );
+        return;
+      }
+    }
+
     setSaving(true);
     const supabase = SupaBaseClientFunction();
 
-    const dbPayload = {
-      school_title: formData.school_title.trim(),
-      school_manager: formData.school_manager.trim() || null,
-      school_type: formData.school_type || 'Senior Secondary',
-      schoole_gmail: formData.schoole_gmail.trim() || null,
-      is_private: Boolean(formData.is_private),
-      is_approved: Boolean(formData.is_approved),
-      is_gdrive_allowed: Boolean(formData.is_gdrive_allowed),
-      is_import_export_allowed: Boolean(formData.is_import_export_allowed),
-      allowed_count_wing: Number(formData.allowed_count_wing) || 7,
-      is_email_service: Boolean(formData.is_email_service),
-      is_collaburation_allowed: Boolean(formData.is_collaburation_allowed),
-      primery_fee: Number(formData.primery_fee) || 450,
-      secondary_fee: Number(formData.secondary_fee) || 550,
-      senior_secondary_fee: Number(formData.senior_secondary_fee) || 750,
-      total_class: Number(formData.total_class) || 0,
-      is_computer_lab: Boolean(formData.is_computer_lab),
-      is_library: Boolean(formData.is_library),
-      youtub_link: formData.youtub_link.trim() || null,
-      insta_link: formData.insta_link.trim() || null,
-      facebook_link: formData.facebook_link.trim() || null,
-      loc_state: formData.loc_state.trim() || null,
-      loc_district: formData.loc_district.trim() || null,
-      loc_city_village: formData.loc_city_village.trim() || null,
-      local_address: formData.local_address.trim() || null,
-      user_uuid: formData.user_uuid.trim() || null,
-    };
-
     try {
       if (editingSchool) {
+        const updatePayload = {
+          school_title: formData.school_title.trim(),
+          school_manager: formData.school_manager.trim() || null,
+          school_type: formData.school_type || 'Senior Secondary',
+          schoole_gmail: formData.schoole_gmail.trim().toLowerCase() || null,
+          logo_url: formData.logo_url.trim() || null,
+          is_private: Boolean(formData.is_private),
+          is_approved: Boolean(formData.is_approved),
+          is_gdrive_allowed: Boolean(formData.is_gdrive_allowed),
+          is_import_export_allowed: Boolean(formData.is_import_export_allowed),
+          allowed_count_wing: Number(formData.allowed_count_wing) || 7,
+          is_email_service: Boolean(formData.is_email_service),
+          is_collaburation_allowed: Boolean(formData.is_collaburation_allowed),
+          primery_fee: Number(formData.primery_fee) || 550,
+          secondary_fee: Number(formData.secondary_fee) || 750,
+          senior_secondary_fee: Number(formData.senior_secondary_fee) || 950,
+          total_class: Number(formData.total_class) || 5,
+          is_computer_lab: Boolean(formData.is_computer_lab),
+          is_library: Boolean(formData.is_library),
+          youtub_link: formData.youtub_link.trim() || null,
+          insta_link: formData.insta_link.trim() || null,
+          facebook_link: formData.facebook_link.trim() || null,
+          loc_state: formData.loc_state.trim() || null,
+          loc_district: formData.loc_district.trim() || null,
+          loc_city_village: formData.loc_city_village.trim() || null,
+          local_address: formData.local_address.trim() || null,
+          user_uuid: formData.user_uuid.trim() || null,
+        };
+
         const { data, error: updateError } = await supabase
           .from('OurSchools')
-          .update(dbPayload)
+          .update(updatePayload)
           .eq('school_id', editingSchool.school_id)
           .select();
 
@@ -466,6 +531,21 @@ export default function AllSchoolsInfo() {
           prev.map((item) => (item.school_id === updatedRow.school_id ? updatedRow : item))
         );
 
+        // Sync SchoolInfo to Turso
+        await saveTursoSchoolInfo(updatedRow.school_id, {
+          total_class: Number(formData.total_class) || 5,
+          primery_class_fee: Number(formData.primery_fee) || 550,
+          seconday_class_fee: Number(formData.secondary_fee) || 750,
+          insta_id_link: formData.insta_link.trim() || null,
+          facebook_link: formData.facebook_link.trim() || null,
+          youtube_link: formData.youtub_link.trim() || null,
+          is_computer_lab: formData.is_computer_lab ? 1 : 0,
+          is_library: formData.is_library ? 1 : 0,
+          about_school: formData.about_school.trim() || null,
+          school_vission: formData.school_vission.trim() || null,
+          school_mission: formData.school_mission.trim() || null,
+        });
+
         updateInactiveIds((prev) => {
           const without = prev.filter((id) => id !== updatedRow.school_id);
           return formData.is_active ? without : [...without, updatedRow.school_id];
@@ -473,14 +553,76 @@ export default function AllSchoolsInfo() {
 
         showMessageBox('success', 'School Updated', `"${updatedRow.school_title}" has been saved.`);
       } else {
+        // 1. Provision auth.users account + public.school_user_info row (role = 'School')
+        const provisioned = await provisionSupabaseAccountAndProfile({
+          email: formData.schoole_gmail.trim(),
+          password: formData.account_password,
+          fullName: formData.school_manager.trim() || formData.school_title.trim(),
+          role: 'School',
+        });
+
+        // 2. Build ERD-exact payloads for OurSchools & SchoolInfo with auth user_uuid
+        const { ourSchoolsRow, buildSchoolInfoRow } = buildSchoolAndInfoPayloads({
+          school_title: formData.school_title,
+          school_manager: formData.school_manager,
+          is_private: formData.is_private,
+          loc_state: formData.loc_state,
+          loc_district: formData.loc_district,
+          loc_city_village: formData.loc_city_village,
+          local_address: formData.local_address,
+          user_uuid: provisioned.user_uuid,
+          schoole_gmail: formData.schoole_gmail,
+          school_type: formData.school_type,
+          is_approved: formData.is_approved,
+          logo_url: formData.logo_url,
+          total_class: Number(formData.total_class) || 5,
+          primery_class_fee: Number(formData.primery_fee) || 550,
+          seconday_class_fee: Number(formData.secondary_fee) || 750,
+          insta_id_link: formData.insta_link,
+          facebook_link: formData.facebook_link,
+          youtube_link: formData.youtub_link,
+          is_computer_lab: formData.is_computer_lab,
+          is_library: formData.is_library,
+          about_school: formData.about_school,
+          school_vission: formData.school_vission,
+          school_mission: formData.school_mission,
+        });
+
+        // Include platform feature controls when inserting into OurSchools
+        const insertPayload = {
+          ...ourSchoolsRow,
+          is_gdrive_allowed: Boolean(formData.is_gdrive_allowed),
+          is_import_export_allowed: Boolean(formData.is_import_export_allowed),
+          allowed_count_wing: Number(formData.allowed_count_wing) || 7,
+          is_email_service: Boolean(formData.is_email_service),
+          is_collaburation_allowed: Boolean(formData.is_collaburation_allowed),
+        };
+
         const { data, error: insertError } = await supabase
           .from('OurSchools')
-          .insert([dbPayload])
+          .insert([insertPayload])
           .select();
 
         if (insertError) throw insertError;
         const createdRow = data?.[0] as SchoolRecord | undefined;
+
         if (createdRow) {
+          // 3. Save companion SchoolInfo profile to Turso linked by school_id
+          const infoRow = buildSchoolInfoRow(createdRow.school_id);
+          await saveTursoSchoolInfo(createdRow.school_id, {
+            total_class: infoRow.total_class,
+            primery_class_fee: infoRow.primery_class_fee,
+            seconday_class_fee: infoRow.seconday_class_fee,
+            insta_id_link: infoRow.insta_id_link,
+            facebook_link: infoRow.facebook_link,
+            youtube_link: infoRow.youtube_link,
+            is_computer_lab: infoRow.is_computer_lab ? 1 : 0,
+            is_library: infoRow.is_library ? 1 : 0,
+            about_school: infoRow.about_school,
+            school_vission: infoRow.school_vission,
+            school_mission: infoRow.school_mission,
+          });
+
           setSchools((prev) =>
             prev.some((item) => item.school_id === createdRow.school_id)
               ? prev
@@ -493,7 +635,12 @@ export default function AllSchoolsInfo() {
             );
           }
         }
-        showMessageBox('success', 'School Created', `"${dbPayload.school_title}" has been added.`);
+
+        showMessageBox(
+          'success',
+          'School & Account Created',
+          `"${ourSchoolsRow.school_title}" created with user_uuid ${provisioned.user_uuid.slice(0, 8)}... in auth.users, school_user_info, OurSchools, and SchoolInfo.`
+        );
       }
 
       setModalOpen(false);
@@ -507,6 +654,45 @@ export default function AllSchoolsInfo() {
       );
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleCreateRoleUser = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!userForm.full_name.trim() || !userForm.email.trim()) {
+      showMessageBox('error', 'Validation Error', 'Full name and email are required.');
+      return;
+    }
+    if (userForm.password.length < 6) {
+      showMessageBox('error', 'Validation Error', 'Password must be at least 6 characters.');
+      return;
+    }
+
+    setCreatingUser(true);
+    try {
+      const result = await provisionSupabaseAccountAndProfile({
+        email: userForm.email.trim(),
+        password: userForm.password,
+        fullName: userForm.full_name.trim(),
+        role: userForm.user_role,
+        schoolId: userForm.school_id || null,
+      });
+
+      showMessageBox(
+        'success',
+        `${result.user_role} Account Created`,
+        `Created auth.users (${result.user_uuid.slice(0, 8)}...) and saved profile in school_user_info for ${result.email}.`
+      );
+      setUserModalOpen(false);
+      setUserForm(EMPTY_USER_FORM);
+    } catch (err: unknown) {
+      showMessageBox(
+        'error',
+        'User Creation Failed',
+        formatSupabaseError(err, 'Could not provision user account.')
+      );
+    } finally {
+      setCreatingUser(false);
     }
   };
 
@@ -721,6 +907,16 @@ export default function AllSchoolsInfo() {
           </button>
           <button
             type="button"
+            onClick={() => {
+              setUserForm(EMPTY_USER_FORM);
+              setUserModalOpen(true);
+            }}
+            className="h-10 rounded-lg border border-indigo-200 bg-indigo-50 px-3.5 text-sm font-semibold text-indigo-700 hover:bg-indigo-100 cursor-pointer"
+          >
+            + Create User (Role)
+          </button>
+          <button
+            type="button"
             onClick={openCreateModal}
             className="h-10 rounded-lg bg-indigo-600 px-4 text-sm font-semibold text-white hover:bg-indigo-700 cursor-pointer"
           >
@@ -830,6 +1026,7 @@ export default function AllSchoolsInfo() {
           <div className="inline-flex items-center gap-1 rounded-lg bg-slate-100 p-1">
             {[
               { key: 'ALL', label: 'All Status' },
+              { key: 'PENDING', label: 'Pending Approval' },
               { key: 'ACTIVE', label: 'Active' },
               { key: 'INACTIVE', label: 'Inactive' },
             ].map((tab) => (
@@ -928,27 +1125,59 @@ export default function AllSchoolsInfo() {
                         onChange={() => toggleSelectOne(school.school_id)}
                         className="mt-1 h-4 w-4 rounded border-slate-300 text-indigo-600"
                       />
-                      <div>
-                        <h2 className="text-base font-bold text-slate-900">
-                          {school.school_title || 'Untitled School'}
-                        </h2>
-                        <p className="mt-0.5 text-xs text-slate-500">
-                          {school.school_type || 'School'} ·{' '}
-                          {school.is_private ? 'Private' : 'Non-Private'} ·{' '}
-                          <span className={active ? 'text-emerald-700 font-medium' : 'text-slate-500'}>
-                            {active ? 'Active' : 'Inactive'}
-                          </span>
-                        </p>
+                      <div className="flex items-start gap-2.5">
+                        {school.logo_url && isSafeHttpUrl(school.logo_url) && (
+                          <img
+                            src={school.logo_url}
+                            alt={`${school.school_title} logo`}
+                            className="h-9 w-9 shrink-0 rounded-lg border border-slate-200 object-cover"
+                          />
+                        )}
+                        <div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h2 className="text-base font-bold text-slate-900">
+                              {school.school_title || 'Untitled School'}
+                            </h2>
+                            {!school.is_approved && (
+                              <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800">
+                                Pending Approval
+                              </span>
+                            )}
+                          </div>
+                          <p className="mt-0.5 text-xs text-slate-500">
+                            {school.school_type || 'School'} ·{' '}
+                            {school.is_private ? 'Private' : 'Non-Private'} ·{' '}
+                            <span
+                              className={active ? 'text-emerald-700 font-medium' : 'text-slate-500'}
+                            >
+                              {active ? 'Active' : 'Inactive'}
+                            </span>
+                          </p>
+                        </div>
                       </div>
                     </label>
 
-                    <button
-                      type="button"
-                      onClick={() => openSchoolDashboard(school)}
-                      className="rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap cursor-pointer"
-                    >
-                      Open Panel
-                    </button>
+                    <div className="flex items-center gap-1.5">
+                      {!school.is_approved && (
+                        <button
+                          type="button"
+                          disabled={isRowBusy}
+                          onClick={() =>
+                            void handleToggleFeatureFlag(school, 'is_approved', 'School Approval')
+                          }
+                          className="rounded-md bg-emerald-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-emerald-700 whitespace-nowrap cursor-pointer disabled:opacity-50"
+                        >
+                          Approve School
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => openSchoolDashboard(school)}
+                        className="rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap cursor-pointer"
+                      >
+                        Open Panel
+                      </button>
+                    </div>
                   </div>
 
                   <div className="space-y-1 text-xs text-slate-600">
@@ -1092,13 +1321,44 @@ export default function AllSchoolsInfo() {
                 </div>
                 <div>
                   <label className="mb-1 block text-xs font-semibold text-slate-700">
-                    School Email (schoole_gmail)
+                    School Email (schoole_gmail) {!editingSchool && '*'}
                   </label>
                   <input
                     type="email"
+                    required={!editingSchool}
                     value={formData.schoole_gmail}
                     onChange={(e) => setFormData({ ...formData, schoole_gmail: e.target.value })}
                     placeholder="school@gmail.com"
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                  />
+                </div>
+                {!editingSchool && (
+                  <div>
+                    <label className="mb-1 block text-xs font-semibold text-slate-700">
+                      Account Password (auth.users &amp; school_user_info) *
+                    </label>
+                    <input
+                      type="password"
+                      required
+                      minLength={6}
+                      value={formData.account_password}
+                      onChange={(e) =>
+                        setFormData({ ...formData, account_password: e.target.value })
+                      }
+                      placeholder="Min. 6 characters"
+                      className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                    />
+                  </div>
+                )}
+                <div className={editingSchool ? 'sm:col-span-2' : ''}>
+                  <label className="mb-1 block text-xs font-semibold text-slate-700">
+                    School Logo URL (logo_url — Google Drive public link)
+                  </label>
+                  <input
+                    type="url"
+                    value={formData.logo_url}
+                    onChange={(e) => setFormData({ ...formData, logo_url: e.target.value })}
+                    placeholder="https://drive.google.com/uc?export=view&id=..."
                     className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
                   />
                 </div>
@@ -1260,6 +1520,90 @@ export default function AllSchoolsInfo() {
                 </div>
               </div>
 
+              {/* SchoolInfo extended profile fields */}
+              <div className="rounded-lg border border-slate-200 bg-white p-4 space-y-3">
+                <p className="text-xs font-bold text-slate-800">
+                  SchoolInfo Profile (Saved to public.SchoolInfo)
+                </p>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  <div>
+                    <label className="mb-1 block text-xs font-semibold text-slate-700">
+                      Total Classes (total_class)
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      value={formData.total_class}
+                      onChange={(e) =>
+                        setFormData({ ...formData, total_class: Number(e.target.value) })
+                      }
+                      className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono text-sm tabular-nums"
+                    />
+                  </div>
+                  <div className="flex items-end pb-2">
+                    <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-700">
+                      <input
+                        type="checkbox"
+                        checked={formData.is_computer_lab}
+                        onChange={(e) =>
+                          setFormData({ ...formData, is_computer_lab: e.target.checked })
+                        }
+                      />
+                      Computer Lab (is_computer_lab)
+                    </label>
+                  </div>
+                  <div className="flex items-end pb-2">
+                    <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-700">
+                      <input
+                        type="checkbox"
+                        checked={formData.is_library}
+                        onChange={(e) => setFormData({ ...formData, is_library: e.target.checked })}
+                      />
+                      Library (is_library)
+                    </label>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  <div>
+                    <label className="mb-1 block text-xs font-semibold text-slate-700">
+                      About School
+                    </label>
+                    <input
+                      type="text"
+                      value={formData.about_school}
+                      onChange={(e) => setFormData({ ...formData, about_school: e.target.value })}
+                      placeholder="Brief campus overview"
+                      className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-semibold text-slate-700">
+                      Vision (school_vission)
+                    </label>
+                    <input
+                      type="text"
+                      value={formData.school_vission}
+                      onChange={(e) => setFormData({ ...formData, school_vission: e.target.value })}
+                      placeholder="School vision"
+                      className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-semibold text-slate-700">
+                      Mission (school_mission)
+                    </label>
+                    <input
+                      type="text"
+                      value={formData.school_mission}
+                      onChange={(e) => setFormData({ ...formData, school_mission: e.target.value })}
+                      placeholder="School mission"
+                      className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                    />
+                  </div>
+                </div>
+              </div>
+
               <div className="flex justify-end gap-2 border-t border-slate-100 pt-4">
                 <button
                   type="button"
@@ -1274,7 +1618,123 @@ export default function AllSchoolsInfo() {
                   disabled={saving}
                   className="h-10 rounded-lg bg-indigo-600 px-5 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-50 cursor-pointer"
                 >
-                  {saving ? 'Saving...' : editingSchool ? 'Save Changes' : 'Create School'}
+                  {saving ? 'Provisioning...' : editingSchool ? 'Save Changes' : 'Create School & User'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Create User (auth.users + school_user_info) Modal */}
+      {userModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4">
+          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-xl">
+            <h2 className="text-lg font-bold text-slate-900">Create Platform User</h2>
+            <p className="mt-1 text-xs text-slate-500">
+              Creates a user in <span className="font-mono">auth.users</span> and links{' '}
+              <span className="font-mono">user_uuid</span> in{' '}
+              <span className="font-mono">school_user_info</span>.
+            </p>
+
+            <form onSubmit={handleCreateRoleUser} className="mt-4 space-y-3.5">
+              <div>
+                <label className="mb-1 block text-xs font-semibold text-slate-700">
+                  Full Name (full_name) *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={userForm.full_name}
+                  onChange={(e) => setUserForm({ ...userForm, full_name: e.target.value })}
+                  placeholder="e.g. Dr. Shafee Alam"
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block text-xs font-semibold text-slate-700">
+                  User Email *
+                </label>
+                <input
+                  type="email"
+                  required
+                  value={userForm.email}
+                  onChange={(e) => setUserForm({ ...userForm, email: e.target.value })}
+                  placeholder="admin@schoolgrid.edu"
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block text-xs font-semibold text-slate-700">
+                  Password (user_password) *
+                </label>
+                <input
+                  type="password"
+                  required
+                  minLength={6}
+                  value={userForm.password}
+                  onChange={(e) => setUserForm({ ...userForm, password: e.target.value })}
+                  placeholder="Min. 6 characters"
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1 block text-xs font-semibold text-slate-700">
+                  Role (user_role) *
+                </label>
+                <select
+                  value={userForm.user_role}
+                  onChange={(e) =>
+                    setUserForm({ ...userForm, user_role: e.target.value as ProvisionableRole })
+                  }
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+                >
+                  {PROVISIONABLE_ROLES.map((roleOption) => (
+                    <option key={roleOption} value={roleOption}>
+                      {roleOption}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {(userForm.user_role === 'Teacher' || userForm.user_role === 'Student') && (
+                <div>
+                  <label className="mb-1 block text-xs font-semibold text-slate-700">
+                    Assigned School (optional)
+                  </label>
+                  <select
+                    value={userForm.school_id}
+                    onChange={(e) => setUserForm({ ...userForm, school_id: e.target.value })}
+                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+                  >
+                    <option value="">Select a school...</option>
+                    {schools.map((s) => (
+                      <option key={s.school_id} value={s.school_id}>
+                        {s.school_title}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2 border-t border-slate-100 pt-4">
+                <button
+                  type="button"
+                  disabled={creatingUser}
+                  onClick={() => setUserModalOpen(false)}
+                  className="h-10 rounded-lg border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={creatingUser}
+                  className="h-10 rounded-lg bg-indigo-600 px-5 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-50 cursor-pointer"
+                >
+                  {creatingUser ? 'Creating...' : 'Create Account'}
                 </button>
               </div>
             </form>

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { Award, Bell, Newspaper, ShieldAlert } from 'lucide-react';
 import { ApiRequestError, apiRequest } from '../../lib/api/platformApi';
+import { useActiveSchool } from '../SchoolContext';
 
 interface AchievementRow {
   id: string;
@@ -30,7 +31,8 @@ interface NoticeRow {
 }
 
 export default function SchoolContentPage() {
-  const [schoolId, setSchoolId] = useState('sch_greenwood_001');
+  const { school } = useActiveSchool();
+  const [schoolId, setSchoolId] = useState('');
   const [tab, setTab] = useState<'achievements' | 'news' | 'notices'>('achievements');
   const [achievements, setAchievements] = useState<AchievementRow[]>([]);
   const [news, setNews] = useState<NewsRow[]>([]);
@@ -53,18 +55,26 @@ export default function SchoolContentPage() {
   const [noticeAudience, setNoticeAudience] = useState<'public' | 'school_all'>('public');
 
   const loadContent = useCallback(async () => {
+    if (!school) return;
     setError(null);
+    let resolvedSlug: string | null = null;
     try {
-      const pubSchools = await apiRequest<Array<{ id: string; slug: string }>>('/api/public/schools', {
+      const pubSchools = await apiRequest<Array<{ id: string; name: string; slug: string }>>('/api/public/schools', {
         requireAuth: false,
       });
-      const target = pubSchools[0] ?? { id: 'sch_greenwood_001', slug: 'greenwood-academy' };
-      setSchoolId(target.id);
+      const normalizedTitle = school.school_title.trim().toLowerCase();
+      const matched =
+        pubSchools.find((s) => s.id === school.school_id) ??
+        pubSchools.find((s) => s.name.trim().toLowerCase() === normalizedTitle) ??
+        null;
+      const targetId = matched?.id ?? school.school_id;
+      resolvedSlug = matched?.slug ?? null;
+      setSchoolId(targetId);
 
       const [achData, newsData, noticeData] = await Promise.all([
-        apiRequest<AchievementRow[]>(`/api/school/${encodeURIComponent(target.id)}/achievements`),
-        apiRequest<NewsRow[]>(`/api/school/${encodeURIComponent(target.id)}/news`),
-        apiRequest<NoticeRow[]>(`/api/school/${encodeURIComponent(target.id)}/notices`),
+        apiRequest<AchievementRow[]>(`/api/school/${encodeURIComponent(targetId)}/achievements`),
+        apiRequest<NewsRow[]>(`/api/school/${encodeURIComponent(targetId)}/news`),
+        apiRequest<NoticeRow[]>(`/api/school/${encodeURIComponent(targetId)}/notices`),
       ]);
       setAchievements(achData);
       setNews(newsData);
@@ -73,23 +83,31 @@ export default function SchoolContentPage() {
     } catch (err) {
       if (err instanceof ApiRequestError && (err.status === 401 || err.status === 403 || err.status === 404)) {
         setAuthRequired(true);
-        try {
-          const pub = await apiRequest<{
-            achievements: AchievementRow[];
-            news: NewsRow[];
-            notices: NoticeRow[];
-          }>('/api/public/schools/greenwood-academy', { requireAuth: false });
-          setAchievements(pub.achievements.map((a) => ({ ...a, visibility: 'public', status: 'published' })));
-          setNews(pub.news.map((n) => ({ ...n, visibility: 'public', status: 'published' })));
-          setNotices(pub.notices.map((n) => ({ ...n, audience: 'public', status: 'published' })));
-        } catch {
-          // Ignore fallback
+        if (resolvedSlug) {
+          try {
+            const pub = await apiRequest<{
+              achievements: AchievementRow[];
+              news: NewsRow[];
+              notices: NoticeRow[];
+            }>(`/api/public/schools/${encodeURIComponent(resolvedSlug)}`, { requireAuth: false });
+            setAchievements(pub.achievements.map((a) => ({ ...a, visibility: 'public', status: 'published' })));
+            setNews(pub.news.map((n) => ({ ...n, visibility: 'public', status: 'published' })));
+            setNotices(pub.notices.map((n) => ({ ...n, audience: 'public', status: 'published' })));
+          } catch {
+            setAchievements([]);
+            setNews([]);
+            setNotices([]);
+          }
+        } else {
+          setAchievements([]);
+          setNews([]);
+          setNotices([]);
         }
       } else {
         setError(err instanceof Error ? err.message : 'Unable to load school content.');
       }
     }
-  }, []);
+  }, [school]);
 
   useEffect(() => {
     void loadContent();

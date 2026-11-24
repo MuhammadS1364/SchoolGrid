@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
-import { Download, Edit2, Lock, Plus, Search, Trash2, Upload } from 'lucide-react';
-import type { SchoolStudentRecord } from '../../lib/SupaBaseClient/mockSupabase';
-import { parseCsvText, serializeRowsToCsv } from '../../lib/services/planEntitlements';
+import { Download, Edit2, KeyRound, Lock, Plus, Search, Trash2 } from 'lucide-react';
+import type { StudentsBoxRecord } from '../../lib/SupaBaseClient/mockSupabase';
+import { serializeRowsToCsv } from '../../lib/services/planEntitlements';
 import {
   createSchoolRecords,
   deleteSchoolRecord,
@@ -12,50 +12,59 @@ import {
   applyRealtimeChange,
   useRealtimeTables,
 } from '../../lib/realtime/useRealtimeTable';
+import {
+  buildStudentInsertPayload,
+  provisionSupabaseAccountAndProfile,
+} from '../../lib/auth/userProvisioning';
+import { isSafeHttpUrl } from '../../lib/GooglDrive/GoogleDrive';
 import { useActiveSchool } from '../SchoolContext';
 
 interface StudentFormState {
-  full_name: string;
-  email: string;
-  roll_number: string;
-  class_name: string;
-  wing: string;
-  fee_tier: 'Primary' | 'Secondary' | 'Senior Secondary';
-  guardian_contact: string;
-  is_active: boolean;
+  AddNo: string;
+  StudentName: string;
+  StudentEmail: string;
+  password: string;
+  FatherName: string;
+  StnState: string;
+  StnDistrict: string;
+  Stn_Class: string;
+  Stn_Dob: string;
+  Student_Photo_Urls: string;
+  IsActive: boolean;
 }
 
 const EMPTY_FORM: StudentFormState = {
-  full_name: '',
-  email: '',
-  roll_number: '',
-  class_name: 'Grade 10 - A',
-  wing: 'Senior Wing',
-  fee_tier: 'Senior Secondary',
-  guardian_contact: '',
-  is_active: true,
+  AddNo: '',
+  StudentName: '',
+  StudentEmail: '',
+  password: '',
+  FatherName: '',
+  StnState: '',
+  StnDistrict: '',
+  Stn_Class: '',
+  Stn_Dob: '',
+  Student_Photo_Urls: '',
+  IsActive: true,
 };
 
 export default function OurStudentsDashBoard() {
   const { school } = useActiveSchool();
-  const [students, setStudents] = useState<SchoolStudentRecord[]>([]);
+  const [students, setStudents] = useState<StudentsBoxRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
   const [query, setQuery] = useState('');
-  const [tierFilter, setTierFilter] = useState<string>('ALL');
+  const [statusFilter, setStatusFilter] = useState<'ALL' | 'ACTIVE' | 'INACTIVE'>('ALL');
   const [modalOpen, setModalOpen] = useState(false);
-  const [importModalOpen, setImportModalOpen] = useState(false);
-  const [csvInput, setCsvInput] = useState(
-    'full_name,email,roll_number,class_name,wing,fee_tier,guardian_contact\n'
-  );
-  const [editing, setEditing] = useState<SchoolStudentRecord | null>(null);
+  const [editing, setEditing] = useState<StudentsBoxRecord | null>(null);
   const [form, setForm] = useState<StudentFormState>(EMPTY_FORM);
   const [notice, setNotice] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
 
   const loadStudents = useCallback(async () => {
     if (!school) return;
     setLoading(true);
-    const { data, error } = await listSchoolRecords<SchoolStudentRecord>(
-      'SchoolStudents',
+    const { data, error } = await listSchoolRecords<StudentsBoxRecord>(
+      'StudentsBox',
       school.school_id
     );
     if (error) {
@@ -70,16 +79,16 @@ export default function OurStudentsDashBoard() {
   }, [loadStudents]);
 
   useRealtimeTables(
-    'school-students-realtime',
+    'school-students-box-realtime',
     [
       {
-        table: 'SchoolStudents',
+        table: 'StudentsBox',
         filter: school ? `school_id=eq.${school.school_id}` : undefined,
         onChange: (payload) => {
           setStudents((prev) =>
-            applyRealtimeChange(prev, payload, 'student_id', {
+            applyRealtimeChange(prev, payload, 'AddNo', {
               filter: (row) => !school || row.school_id === school.school_id,
-              sort: (a, b) => String(b.created_at ?? '').localeCompare(String(a.created_at ?? '')),
+              sort: (a, b) => String(b.AddNo ?? '').localeCompare(String(a.AddNo ?? '')),
             })
           );
         },
@@ -91,201 +100,215 @@ export default function OurStudentsDashBoard() {
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return students.filter((s) => {
-      if (tierFilter !== 'ALL' && s.fee_tier !== tierFilter) return false;
+      if (statusFilter === 'ACTIVE' && s.IsActive === false) return false;
+      if (statusFilter === 'INACTIVE' && s.IsActive !== false) return false;
       if (!q) return true;
-      return [s.full_name, s.email, s.roll_number, s.class_name, s.wing].some((v) =>
-        String(v || '').toLowerCase().includes(q)
-      );
+      return [
+        s.AddNo,
+        s.StudentName,
+        s.StudentEmail,
+        s.FatherName,
+        s.StnState,
+        s.StnDistrict,
+      ].some((v) => String(v || '').toLowerCase().includes(q));
     });
-  }, [students, query, tierFilter]);
+  }, [students, query, statusFilter]);
 
   if (!school) return null;
 
-  const getFeeForTier = (tier: SchoolStudentRecord['fee_tier']) => {
-    if (tier === 'Primary') return school.primery_fee;
-    if (tier === 'Secondary') return school.secondary_fee;
-    return school.senior_secondary_fee;
-  };
-
   const openCreate = () => {
     setEditing(null);
-    setForm(EMPTY_FORM);
+    setFormError(null);
+    setForm({
+      ...EMPTY_FORM,
+      StnState: school.loc_state || '',
+      StnDistrict: school.loc_district || '',
+    });
     setModalOpen(true);
   };
 
-  const openEdit = (stu: SchoolStudentRecord) => {
+  const openEdit = (stu: StudentsBoxRecord) => {
     setEditing(stu);
+    setFormError(null);
     setForm({
-      full_name: stu.full_name,
-      email: stu.email,
-      roll_number: stu.roll_number,
-      class_name: stu.class_name,
-      wing: stu.wing,
-      fee_tier: stu.fee_tier,
-      guardian_contact: stu.guardian_contact,
-      is_active: stu.is_active,
+      AddNo: stu.AddNo,
+      StudentName: stu.StudentName || '',
+      StudentEmail: stu.StudentEmail || '',
+      password: '',
+      FatherName: stu.FatherName || '',
+      StnState: stu.StnState || '',
+      StnDistrict: stu.StnDistrict || '',
+      Stn_Class: stu.Stn_Class || '',
+      Stn_Dob: stu.Stn_Dob || '',
+      Student_Photo_Urls: stu.Student_Photo_Urls || '',
+      IsActive: stu.IsActive !== false,
     });
     setModalOpen(true);
   };
 
   const handleSave = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!form.full_name.trim()) return;
-
-    if (editing) {
-      const { data: updated, error } = await updateSchoolRecord<SchoolStudentRecord>(
-        'SchoolStudents',
-        editing.student_id,
-        {
-          ...form,
-          full_name: form.full_name.trim(),
-          email: form.email.trim(),
-        }
-      );
-      if (error) {
-        setNotice(error);
-        return;
-      }
-      if (updated) {
-        setStudents((prev) =>
-          prev.map((item) => (item.student_id === updated.student_id ? updated : item))
-        );
-      }
-      setNotice(`Updated student "${form.full_name.trim()}".`);
-    } else {
-      const { data: createdList, error } = await createSchoolRecords<SchoolStudentRecord>(
-        'SchoolStudents',
-        [
-          {
-            school_id: school.school_id,
-            ...form,
-            full_name: form.full_name.trim(),
-            email: form.email.trim(),
-          },
-        ]
-      );
-      if (error) {
-        setNotice(error);
-        return;
-      }
-      const created = createdList[0];
-      if (created) {
-        setStudents((prev) =>
-          prev.some((item) => item.student_id === created.student_id)
-            ? prev
-            : [created, ...prev]
-        );
-      }
-      setNotice(`Enrolled student "${form.full_name.trim()}" (Role: Student).`);
+    setFormError(null);
+    if (!form.AddNo.trim() || !form.StudentName.trim() || !form.StudentEmail.trim()) {
+      setFormError('Admission No (AddNo), Student Name, and Student Email are required.');
+      return;
     }
-    setModalOpen(false);
+    if (form.Student_Photo_Urls.trim() && !isSafeHttpUrl(form.Student_Photo_Urls.trim())) {
+      setFormError('Student photo URL must be a valid http:// or https:// Drive link.');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      if (editing) {
+        const { data: updated, error } = await updateSchoolRecord<StudentsBoxRecord>(
+          'StudentsBox',
+          editing.AddNo,
+          {
+            StudentName: form.StudentName.trim(),
+            StudentEmail: form.StudentEmail.trim().toLowerCase(),
+            FatherName: form.FatherName.trim() || null,
+            StnState: form.StnState.trim() || '',
+            StnDistrict: form.StnDistrict.trim() || '',
+            Stn_Class: form.Stn_Class.trim() || null,
+            Stn_Dob: form.Stn_Dob.trim() || null,
+            Student_Photo_Urls: form.Student_Photo_Urls.trim() || null,
+            IsActive: form.IsActive,
+          }
+        );
+        if (error) {
+          setFormError(error);
+          return;
+        }
+        if (updated) {
+          setStudents((prev) =>
+            prev.map((item) => (item.AddNo === updated.AddNo ? updated : item))
+          );
+        }
+        setNotice(`Updated student "${form.StudentName.trim()}" (${editing.AddNo}).`);
+      } else {
+        if (form.password.length < 6) {
+          setFormError('Password must be at least 6 characters to create the student login account.');
+          return;
+        }
+
+        // Step 1 + 2: Create Supabase auth.users -> pick user_uuid -> save school_user_info (Role: Student)
+        const provisioned = await provisionSupabaseAccountAndProfile({
+          email: form.StudentEmail.trim(),
+          password: form.password,
+          fullName: form.StudentName.trim(),
+          role: 'Student',
+          schoolId: school.school_id,
+        });
+
+        // Step 3: Insert into public."StudentsBox" with REQUIRED AddNo, school_id, and stn_user_id
+        const studentRow = buildStudentInsertPayload({
+          AddNo: form.AddNo.trim(),
+          school_id: school.school_id,
+          stn_user_id: provisioned.user_uuid,
+          StudentName: form.StudentName.trim(),
+          StudentEmail: form.StudentEmail.trim(),
+          FatherName: form.FatherName.trim() || null,
+          StnState: form.StnState.trim() || '',
+          StnDistrict: form.StnDistrict.trim() || '',
+          Stn_Class: form.Stn_Class.trim() || null,
+          Stn_Dob: form.Stn_Dob.trim() || null,
+          Student_Photo_Urls: form.Student_Photo_Urls.trim() || null,
+          IsActive: form.IsActive,
+        });
+
+        const { data: createdList, error } = await createSchoolRecords<StudentsBoxRecord>(
+          'StudentsBox',
+          [studentRow]
+        );
+        if (error) {
+          setFormError(error);
+          return;
+        }
+        const created = createdList[0];
+        if (created) {
+          setStudents((prev) =>
+            prev.some((item) => item.AddNo === created.AddNo) ? prev : [created, ...prev]
+          );
+        }
+        setNotice(
+          `Created auth account + school_user_info (Role: Student, stn_user_id: ${provisioned.user_uuid.slice(0, 8)}...) and enrolled "${form.StudentName.trim()}" (${form.AddNo.trim()}) in StudentsBox.`
+        );
+      }
+      setModalOpen(false);
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Failed to enroll student.');
+    } finally {
+      setSaving(false);
+    }
   };
 
-  const handleDelete = async (stu: SchoolStudentRecord) => {
-    const { error } = await deleteSchoolRecord('SchoolStudents', stu.student_id);
+  const handleDelete = async (stu: StudentsBoxRecord) => {
+    const { error } = await deleteSchoolRecord('StudentsBox', stu.AddNo);
     if (error) {
       setNotice(error);
       return;
     }
-    setStudents((prev) => prev.filter((item) => item.student_id !== stu.student_id));
-    setNotice(`Removed student "${stu.full_name}".`);
+    setStudents((prev) => prev.filter((item) => item.AddNo !== stu.AddNo));
+    setNotice(`Removed student "${stu.StudentName || stu.AddNo}".`);
   };
 
   const handleExportCsv = () => {
     if (!school.is_import_export_allowed) return;
     const csv = serializeRowsToCsv(
-      ['full_name', 'email', 'roll_number', 'class_name', 'wing', 'fee_tier', 'guardian_contact'],
+      [
+        'AddNo',
+        'StudentName',
+        'StudentEmail',
+        'FatherName',
+        'school_id',
+        'stn_user_id',
+        'StnState',
+        'StnDistrict',
+        'Stn_Dob',
+        'Grand_Total_Points',
+        'Student_Photo_Urls',
+      ],
       students as unknown as Array<Record<string, unknown>>
     );
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${school.school_title.replace(/\s+/g, '_')}_students.csv`;
+    a.download = `${school.school_title.replace(/\s+/g, '_')}_StudentsBox.csv`;
     a.click();
     URL.revokeObjectURL(url);
     setNotice(`Exported ${students.length} student record(s) to CSV.`);
-  };
-
-  const handleImportCsv = async (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    if (!school.is_import_export_allowed) return;
-    const rows = parseCsvText(csvInput);
-    if (rows.length === 0) {
-      setNotice('No valid CSV rows found. Include header row and at least one student row.');
-      return;
-    }
-
-    const payloads = rows
-      .filter((r) => r.full_name)
-      .map((r) => ({
-        school_id: school.school_id,
-        full_name: r.full_name,
-        email: r.email || `student.${Date.now()}@school.edu`,
-        roll_number: r.roll_number || `STU-${Math.floor(1000 + Math.random() * 9000)}`,
-        class_name: r.class_name || 'Grade 1 - A',
-        wing: r.wing || 'Primary Wing',
-        fee_tier:
-          r.fee_tier === 'Secondary' || r.fee_tier === 'Senior Secondary'
-            ? r.fee_tier
-            : 'Primary',
-        guardian_contact: r.guardian_contact || '',
-        is_active: true,
-      }));
-
-    if (payloads.length === 0) return;
-
-    const { data: created, error } = await createSchoolRecords<SchoolStudentRecord>(
-      'SchoolStudents',
-      payloads
-    );
-    if (error) {
-      setNotice(error);
-      return;
-    }
-    setStudents((prev) => {
-      const existingIds = new Set(prev.map((s) => s.student_id));
-      const fresh = created.filter((s) => !existingIds.has(s.student_id));
-      return [...fresh, ...prev];
-    });
-    setImportModalOpen(false);
-    setNotice(`Imported ${created.length} student(s) via CSV.`);
   };
 
   return (
     <div className="mx-auto max-w-6xl space-y-6 p-4 sm:p-6">
       <div className="flex flex-col gap-3 border-b border-slate-200 pb-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900">Students</h1>
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900">
+            Students
+          </h1>
           <p className="mt-1 text-sm text-slate-500 tabular-nums">
-            Showing {filtered.length} of {students.length} enrolled students · {school.school_title}
+            Showing {filtered.length} of {students.length} enrolled students · {school.school_title}{' '}
+            · Links required <code className="font-mono">school_id</code> &amp;{' '}
+            <code className="font-mono">stn_user_id</code>
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
           {school.is_import_export_allowed ? (
-            <>
-              <button
-                type="button"
-                onClick={() => setImportModalOpen(true)}
-                className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 text-sm font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
-              >
-                <Upload className="h-4 w-4" />
-                Import CSV
-              </button>
-              <button
-                type="button"
-                onClick={handleExportCsv}
-                className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 text-sm font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
-              >
-                <Download className="h-4 w-4" />
-                Export CSV
-              </button>
-            </>
+            <button
+              type="button"
+              onClick={handleExportCsv}
+              className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 text-sm font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
+            >
+              <Download className="h-4 w-4" />
+              Export CSV
+            </button>
           ) : (
             <span className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-100 px-3 text-xs font-medium text-slate-500">
               <Lock className="h-3.5 w-3.5" />
-              Import/Export disabled by SuperAdmin
+              Export disabled by SuperAdmin
             </span>
           )}
           <button
@@ -302,7 +325,7 @@ export default function OurStudentsDashBoard() {
       {notice && (
         <div
           role="status"
-          className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700"
+          className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800"
         >
           {notice}
         </div>
@@ -316,24 +339,24 @@ export default function OurStudentsDashBoard() {
             type="search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search by name, roll number, class..."
+            placeholder="Search by AddNo, student name, father name..."
             className="h-10 w-full rounded-lg border border-slate-200 bg-white pl-9 pr-3 text-sm focus:border-indigo-500 focus:outline-none"
           />
         </div>
 
         <div className="inline-flex items-center gap-1 rounded-lg bg-slate-100 p-1 text-xs">
-          {['ALL', 'Primary', 'Secondary', 'Senior Secondary'].map((tier) => (
+          {(['ALL', 'ACTIVE', 'INACTIVE'] as const).map((tab) => (
             <button
-              key={tier}
+              key={tab}
               type="button"
-              onClick={() => setTierFilter(tier)}
-              className={`rounded-md px-3 py-1.5 font-medium transition-colors cursor-pointer whitespace-nowrap ${
-                tierFilter === tier
+              onClick={() => setStatusFilter(tab)}
+              className={`rounded-md px-3 py-1.5 font-medium transition-colors cursor-pointer ${
+                statusFilter === tab
                   ? 'bg-white text-slate-900 shadow-sm'
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              {tier === 'ALL' ? 'All Tiers' : tier}
+              {tab === 'ALL' ? 'All Students' : tab === 'ACTIVE' ? 'Active' : 'Inactive'}
             </button>
           ))}
         </div>
@@ -343,46 +366,59 @@ export default function OurStudentsDashBoard() {
         <div className="text-sm text-slate-500">Loading students...</div>
       ) : filtered.length === 0 ? (
         <div className="rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center text-sm text-slate-500">
-          No students match your current filter. Click &quot;Add Student&quot; to enroll a student.
+          No students found. Click &quot;Add Student&quot; to create an auth account and enroll a student.
         </div>
       ) : (
         <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
-          <table className="w-full min-w-[740px] text-left text-sm">
+          <table className="w-full min-w-[780px] text-left text-sm">
             <thead className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-600">
               <tr>
-                <th className="px-4 py-3">Roll No.</th>
-                <th className="px-4 py-3">Student</th>
-                <th className="px-4 py-3">Class &amp; Wing</th>
-                <th className="px-4 py-3">Fee Tier</th>
-                <th className="px-4 py-3">Guardian Contact</th>
+                <th className="px-4 py-3">AddNo</th>
+                <th className="px-4 py-3">Student &amp; Email</th>
+                <th className="px-4 py-3">Father Name</th>
+                <th className="px-4 py-3">Location</th>
+                <th className="px-4 py-3">Grand Points</th>
+                <th className="px-4 py-3">Auth User ID</th>
                 <th className="px-4 py-3 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filtered.map((stu) => (
-                <tr key={stu.student_id} className="hover:bg-slate-50/70">
-                  <td className="px-4 py-3 font-mono text-xs font-medium text-slate-700 tabular-nums">
-                    {stu.roll_number || '—'}
+                <tr key={stu.AddNo} className="hover:bg-slate-50/70">
+                  <td className="px-4 py-3 font-mono text-xs font-semibold text-slate-800 tabular-nums">
+                    {stu.AddNo}
                   </td>
                   <td className="px-4 py-3">
-                    <p className="font-semibold text-slate-900">{stu.full_name}</p>
-                    <p className="text-xs text-slate-500">{stu.email || '—'}</p>
+                    <div className="flex items-center gap-2.5">
+                      {stu.Student_Photo_Urls && isSafeHttpUrl(stu.Student_Photo_Urls) && (
+                        <img
+                          src={stu.Student_Photo_Urls}
+                          alt={stu.StudentName || stu.AddNo}
+                          className="h-8 w-8 rounded-full object-cover border border-slate-200"
+                        />
+                      )}
+                      <div>
+                        <p className="font-semibold text-slate-900">{stu.StudentName || '—'}</p>
+                        <p className="text-xs text-slate-500">{stu.StudentEmail || '—'}</p>
+                      </div>
+                    </div>
                   </td>
-                  <td className="px-4 py-3 text-slate-700">
-                    {stu.class_name} · <span className="text-slate-500">{stu.wing}</span>
+                  <td className="px-4 py-3 text-slate-700">{stu.FatherName || '—'}</td>
+                  <td className="px-4 py-3 text-xs text-slate-600">
+                    {[stu.StnDistrict, stu.StnState].filter(Boolean).join(', ') || '—'}
                   </td>
-                  <td className="px-4 py-3 font-mono text-xs text-slate-700 tabular-nums">
-                    {stu.fee_tier} (₹{getFeeForTier(stu.fee_tier)})
+                  <td className="px-4 py-3 font-mono text-xs font-semibold text-indigo-700 tabular-nums">
+                    {stu.Grand_Total_Points ?? 0} pts
                   </td>
-                  <td className="px-4 py-3 font-mono text-xs text-slate-600 tabular-nums">
-                    {stu.guardian_contact || '—'}
+                  <td className="px-4 py-3 font-mono text-[11px] text-slate-500">
+                    {stu.stn_user_id ? `${stu.stn_user_id.slice(0, 8)}...` : 'Linked'}
                   </td>
                   <td className="px-4 py-3 text-right">
                     <div className="inline-flex items-center gap-1.5">
                       <button
                         type="button"
                         onClick={() => openEdit(stu)}
-                        aria-label={`Edit ${stu.full_name}`}
+                        aria-label={`Edit ${stu.StudentName || stu.AddNo}`}
                         className="rounded p-1.5 text-slate-600 hover:bg-blue-50 hover:text-blue-700 cursor-pointer"
                       >
                         <Edit2 className="h-4 w-4" />
@@ -390,7 +426,7 @@ export default function OurStudentsDashBoard() {
                       <button
                         type="button"
                         onClick={() => void handleDelete(stu)}
-                        aria-label={`Delete ${stu.full_name}`}
+                        aria-label={`Delete ${stu.StudentName || stu.AddNo}`}
                         className="rounded p-1.5 text-slate-600 hover:bg-rose-50 hover:text-rose-700 cursor-pointer"
                       >
                         <Trash2 className="h-4 w-4" />
@@ -411,116 +447,170 @@ export default function OurStudentsDashBoard() {
           aria-modal="true"
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4"
         >
-          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-xl">
+          <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl border border-slate-200 bg-white p-6 shadow-xl">
             <h2 className="text-lg font-bold text-slate-900">
-              {editing ? 'Edit Student' : 'Enroll New Student'}
+              {editing ? 'Edit Student' : 'Enroll New Student (Creates Auth Account)'}
             </h2>
+            {!editing && (
+              <p className="mt-1 text-xs text-slate-500">
+                Creates Supabase auth user → saves <code className="font-mono">school_user_info</code>{' '}
+                (role: Student) → links required <code className="font-mono">school_id</code> &amp;{' '}
+                <code className="font-mono">stn_user_id</code> in <code className="font-mono">StudentsBox</code>.
+              </p>
+            )}
+
+            {formError && (
+              <div
+                role="alert"
+                className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700"
+              >
+                {formError}
+              </div>
+            )}
+
             <form onSubmit={handleSave} className="mt-4 space-y-3.5">
-              <div>
-                <label htmlFor="stu_name" className="mb-1 block text-xs font-semibold text-slate-700">
-                  Student Full Name *
-                </label>
-                <input
-                  id="stu_name"
-                  type="text"
-                  required
-                  value={form.full_name}
-                  onChange={(e) => setForm({ ...form, full_name: e.target.value })}
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div>
-                  <label htmlFor="stu_roll" className="mb-1 block text-xs font-semibold text-slate-700">
-                    Roll Number
+                  <label htmlFor="stu_addno" className="mb-1 block text-xs font-semibold text-slate-700">
+                    Admission No (AddNo) *
                   </label>
                   <input
-                    id="stu_roll"
+                    id="stu_addno"
                     type="text"
-                    value={form.roll_number}
-                    onChange={(e) => setForm({ ...form, roll_number: e.target.value })}
-                    placeholder="GW-1020"
-                    className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono text-sm"
+                    required
+                    disabled={Boolean(editing)}
+                    value={form.AddNo}
+                    onChange={(e) => setForm({ ...form, AddNo: e.target.value })}
+                    placeholder="GW-2026-101"
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono text-sm disabled:bg-slate-100"
                   />
                 </div>
                 <div>
-                  <label htmlFor="stu_tier" className="mb-1 block text-xs font-semibold text-slate-700">
-                    Fee Tier
-                  </label>
-                  <select
-                    id="stu_tier"
-                    value={form.fee_tier}
-                    onChange={(e) =>
-                      setForm({
-                        ...form,
-                        fee_tier: e.target.value as 'Primary' | 'Secondary' | 'Senior Secondary',
-                      })
-                    }
-                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
-                  >
-                    <option value="Primary">Primary</option>
-                    <option value="Secondary">Secondary</option>
-                    <option value="Senior Secondary">Senior Secondary</option>
-                  </select>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label htmlFor="stu_class" className="mb-1 block text-xs font-semibold text-slate-700">
-                    Class
+                  <label htmlFor="stu_name" className="mb-1 block text-xs font-semibold text-slate-700">
+                    Student Name *
                   </label>
                   <input
-                    id="stu_class"
+                    id="stu_name"
                     type="text"
-                    value={form.class_name}
-                    onChange={(e) => setForm({ ...form, class_name: e.target.value })}
-                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                  />
-                </div>
-                <div>
-                  <label htmlFor="stu_wing" className="mb-1 block text-xs font-semibold text-slate-700">
-                    Wing
-                  </label>
-                  <input
-                    id="stu_wing"
-                    type="text"
-                    value={form.wing}
-                    onChange={(e) => setForm({ ...form, wing: e.target.value })}
-                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                  />
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label htmlFor="stu_email" className="mb-1 block text-xs font-semibold text-slate-700">
-                    Student Email
-                  </label>
-                  <input
-                    id="stu_email"
-                    type="email"
-                    value={form.email}
-                    onChange={(e) => setForm({ ...form, email: e.target.value })}
-                    placeholder="student@school.edu"
-                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                  />
-                </div>
-                <div>
-                  <label htmlFor="stu_guardian" className="mb-1 block text-xs font-semibold text-slate-700">
-                    Guardian Contact
-                  </label>
-                  <input
-                    id="stu_guardian"
-                    type="tel"
-                    value={form.guardian_contact}
-                    onChange={(e) => setForm({ ...form, guardian_contact: e.target.value })}
+                    required
+                    value={form.StudentName}
+                    onChange={(e) => setForm({ ...form, StudentName: e.target.value })}
                     className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
                   />
                 </div>
               </div>
 
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label htmlFor="stu_email" className="mb-1 block text-xs font-semibold text-slate-700">
+                    Student Email *
+                  </label>
+                  <input
+                    id="stu_email"
+                    type="email"
+                    required
+                    value={form.StudentEmail}
+                    onChange={(e) => setForm({ ...form, StudentEmail: e.target.value })}
+                    placeholder="student@school.edu"
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                  />
+                </div>
+
+                {!editing && (
+                  <div>
+                    <label
+                      htmlFor="stu_password"
+                      className="mb-1 flex items-center gap-1 text-xs font-semibold text-slate-700"
+                    >
+                      <KeyRound className="h-3 w-3 text-indigo-600" />
+                      Login Password *
+                    </label>
+                    <input
+                      id="stu_password"
+                      type="password"
+                      required
+                      minLength={6}
+                      value={form.password}
+                      onChange={(e) => setForm({ ...form, password: e.target.value })}
+                      placeholder="Min. 6 characters"
+                      className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                    />
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label htmlFor="stu_father" className="mb-1 block text-xs font-semibold text-slate-700">
+                    Father Name
+                  </label>
+                  <input
+                    id="stu_father"
+                    type="text"
+                    value={form.FatherName}
+                    onChange={(e) => setForm({ ...form, FatherName: e.target.value })}
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="stu_dob" className="mb-1 block text-xs font-semibold text-slate-700">
+                    Date of Birth
+                  </label>
+                  <input
+                    id="stu_dob"
+                    type="date"
+                    value={form.Stn_Dob}
+                    onChange={(e) => setForm({ ...form, Stn_Dob: e.target.value })}
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label htmlFor="stu_state" className="mb-1 block text-xs font-semibold text-slate-700">
+                    State
+                  </label>
+                  <input
+                    id="stu_state"
+                    type="text"
+                    value={form.StnState}
+                    onChange={(e) => setForm({ ...form, StnState: e.target.value })}
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="stu_district" className="mb-1 block text-xs font-semibold text-slate-700">
+                    District
+                  </label>
+                  <input
+                    id="stu_district"
+                    type="text"
+                    value={form.StnDistrict}
+                    onChange={(e) => setForm({ ...form, StnDistrict: e.target.value })}
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label htmlFor="stu_photo" className="mb-1 block text-xs font-semibold text-slate-700">
+                  Student Photo URL (Public Google Drive Link)
+                </label>
+                <input
+                  id="stu_photo"
+                  type="url"
+                  value={form.Student_Photo_Urls}
+                  onChange={(e) => setForm({ ...form, Student_Photo_Urls: e.target.value })}
+                  placeholder="https://drive.google.com/uc?export=view&id=..."
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                />
+              </div>
+
               <div className="flex justify-end gap-2 border-t border-slate-100 pt-4">
                 <button
                   type="button"
+                  disabled={saving}
                   onClick={() => setModalOpen(false)}
                   className="h-10 rounded-lg border border-slate-200 px-4 text-sm font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
                 >
@@ -528,48 +618,10 @@ export default function OurStudentsDashBoard() {
                 </button>
                 <button
                   type="submit"
-                  className="h-10 rounded-lg bg-indigo-600 px-5 text-sm font-semibold text-white hover:bg-indigo-700 cursor-pointer"
+                  disabled={saving}
+                  className="h-10 rounded-lg bg-indigo-600 px-5 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-60 cursor-pointer"
                 >
-                  {editing ? 'Save Student' : 'Enroll Student'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* CSV Import Modal */}
-      {importModalOpen && school.is_import_export_allowed && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4"
-        >
-          <div className="w-full max-w-lg rounded-xl border border-slate-200 bg-white p-6 shadow-xl">
-            <h2 className="text-lg font-bold text-slate-900">Import Students via CSV</h2>
-            <p className="mt-1 text-xs text-slate-500">
-              Paste CSV lines matching the header row to enroll multiple students at once.
-            </p>
-            <form onSubmit={handleImportCsv} className="mt-4 space-y-4">
-              <textarea
-                rows={6}
-                value={csvInput}
-                onChange={(e) => setCsvInput(e.target.value)}
-                className="w-full rounded-lg border border-slate-200 p-3 font-mono text-xs text-slate-800"
-              />
-              <div className="flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setImportModalOpen(false)}
-                  className="h-10 rounded-lg border border-slate-200 px-4 text-sm font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="h-10 rounded-lg bg-indigo-600 px-5 text-sm font-semibold text-white hover:bg-indigo-700 cursor-pointer"
-                >
-                  Import Rows
+                  {saving ? 'Provisioning...' : editing ? 'Save Student' : 'Enroll Student'}
                 </button>
               </div>
             </form>

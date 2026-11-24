@@ -1,11 +1,26 @@
 import SupaBaseClientFunction from '../SupaBaseClient/SupaBaseClientFunction';
 
-export type SchoolDirectoryTable = 'SchoolTeachers' | 'SchoolStudents' | 'SchoolClasses';
+export type SchoolDirectoryTable =
+  | 'SchoolTeachers'
+  | 'SchoolStudents'
+  | 'StudentsBox'
+  | 'SchoolClasses'
+  | 'SchoolInfo';
 
 const PK_MAP: Record<SchoolDirectoryTable, string> = {
   SchoolTeachers: 'teacher_id',
   SchoolStudents: 'student_id',
+  StudentsBox: 'AddNo',
   SchoolClasses: 'class_id',
+  SchoolInfo: 'school_info_id',
+};
+
+const ORDER_COL_MAP: Record<SchoolDirectoryTable, string> = {
+  SchoolTeachers: 'created_at',
+  SchoolStudents: 'created_at',
+  StudentsBox: 'AddNo',
+  SchoolClasses: 'created_at',
+  SchoolInfo: 'created_at',
 };
 
 const LOCAL_STORAGE_KEY = 'schoolgrid_school_directory_v1';
@@ -39,7 +54,9 @@ function readLocalStore(): LocalStore {
   const empty: LocalStore = {
     SchoolTeachers: [],
     SchoolStudents: [],
+    StudentsBox: [],
     SchoolClasses: [],
+    SchoolInfo: [],
   };
   try {
     if (typeof window === 'undefined' || !window.localStorage) return empty;
@@ -49,7 +66,9 @@ function readLocalStore(): LocalStore {
     return {
       SchoolTeachers: Array.isArray(parsed.SchoolTeachers) ? parsed.SchoolTeachers : [],
       SchoolStudents: Array.isArray(parsed.SchoolStudents) ? parsed.SchoolStudents : [],
+      StudentsBox: Array.isArray(parsed.StudentsBox) ? parsed.StudentsBox : [],
       SchoolClasses: Array.isArray(parsed.SchoolClasses) ? parsed.SchoolClasses : [],
+      SchoolInfo: Array.isArray(parsed.SchoolInfo) ? parsed.SchoolInfo : [],
     };
   } catch {
     return empty;
@@ -77,11 +96,12 @@ export async function listSchoolRecords<T extends object>(
   schoolId: string
 ): Promise<{ data: T[]; error: string | null }> {
   const supabase = SupaBaseClientFunction();
+  const orderCol = ORDER_COL_MAP[table];
   const { data, error } = await supabase
     .from(table)
     .select('*')
     .eq('school_id', schoolId)
-    .order('created_at', { ascending: false });
+    .order(orderCol, { ascending: false });
 
   if (!error) {
     return { data: ((data as unknown as T[]) ?? []), error: null };
@@ -91,7 +111,7 @@ export async function listSchoolRecords<T extends object>(
     const store = readLocalStore();
     const rows = store[table]
       .filter((row) => row.school_id === schoolId)
-      .sort((a, b) => String(b.created_at ?? '').localeCompare(String(a.created_at ?? '')));
+      .sort((a, b) => String(b[orderCol] ?? '').localeCompare(String(a[orderCol] ?? '')));
     return { data: rows as unknown as T[], error: null };
   }
 
@@ -102,10 +122,11 @@ export async function listAllSchoolRecords<T extends object>(
   table: SchoolDirectoryTable
 ): Promise<{ data: T[]; error: string | null }> {
   const supabase = SupaBaseClientFunction();
+  const orderCol = ORDER_COL_MAP[table];
   const { data, error } = await supabase
     .from(table)
     .select('*')
-    .order('created_at', { ascending: false });
+    .order(orderCol, { ascending: false });
 
   if (!error) {
     return { data: ((data as unknown as T[]) ?? []), error: null };

@@ -1,178 +1,166 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Download, Lock, Plus, Trash2, Edit2 } from 'lucide-react';
-import type { SchoolClassRecord } from '../../lib/SupaBaseClient/mockSupabase';
+import type { SchoolTeacherRecord } from '../../lib/SupaBaseClient/mockSupabase';
 import { serializeRowsToCsv } from '../../lib/services/planEntitlements';
+import { listSchoolRecords } from '../../lib/services/schoolDirectoryStore';
 import {
-  createSchoolRecords,
-  deleteSchoolRecord,
-  listSchoolRecords,
-  updateSchoolRecord,
-} from '../../lib/services/schoolDirectoryStore';
-import {
-  applyRealtimeChange,
-  useRealtimeTables,
-} from '../../lib/realtime/useRealtimeTable';
+  createTursoSchoolClass,
+  deleteTursoSchoolClass,
+  fetchTursoSchoolClasses,
+  updateTursoSchoolClass,
+  type TursoSchoolClass,
+} from '../../lib/services/tursoSchoolData';
 import { useActiveSchool } from '../SchoolContext';
 
 interface ClassFormState {
-  class_name: string;
-  wing: string;
-  level: 'Primary' | 'Secondary' | 'Senior Secondary';
-  teacher_name: string;
-  room_no: string;
-  capacity: number;
+  class_title: string;
+  sub_title: string;
+  class_teacher_id: string;
+  total_students: number;
+  is_active: boolean;
 }
 
 const EMPTY_CLASS_FORM: ClassFormState = {
-  class_name: '',
-  wing: 'Primary Wing',
-  level: 'Primary',
-  teacher_name: '',
-  room_no: '',
-  capacity: 35,
+  class_title: 'Seconday First Year',
+  sub_title: 'U1',
+  class_teacher_id: '',
+  total_students: 0,
+  is_active: true,
 };
 
 export default function OurClassInfo() {
-  const { school } = useActiveSchool();
-  const [classes, setClasses] = useState<SchoolClassRecord[]>([]);
+  const { school, schoolInfo } = useActiveSchool();
+  const [classes, setClasses] = useState<TursoSchoolClass[]>([]);
+  const [teachers, setTeachers] = useState<SchoolTeacherRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
-  const [editing, setEditing] = useState<SchoolClassRecord | null>(null);
+  const [editing, setEditing] = useState<TursoSchoolClass | null>(null);
   const [form, setForm] = useState<ClassFormState>(EMPTY_CLASS_FORM);
+  const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const loadClasses = useCallback(async () => {
+  const loadClassesAndTeachers = useCallback(async () => {
     if (!school) return;
     setLoading(true);
-    const { data, error } = await listSchoolRecords<SchoolClassRecord>(
-      'SchoolClasses',
+    const { data: teacherRows } = await listSchoolRecords<SchoolTeacherRecord>(
+      'SchoolTeachers',
       school.school_id
     );
-    if (error) {
-      setNotice(error);
-    }
-    setClasses(data);
+    setTeachers(teacherRows);
+
+    const teacherIds = teacherRows.map((t) => t.teacher_id).filter(Boolean);
+    const tursoRows = await fetchTursoSchoolClasses({
+      schoolId: school.school_id,
+      teacherIds,
+    });
+    setClasses(tursoRows);
     setLoading(false);
   }, [school]);
 
   useEffect(() => {
-    void loadClasses();
-  }, [loadClasses]);
+    void loadClassesAndTeachers();
+  }, [loadClassesAndTeachers]);
 
-  useRealtimeTables(
-    'school-classes-realtime',
-    [
-      {
-        table: 'SchoolClasses',
-        filter: school ? `school_id=eq.${school.school_id}` : undefined,
-        onChange: (payload) => {
-          setClasses((prev) =>
-            applyRealtimeChange(prev, payload, 'class_id', {
-              filter: (row) => !school || row.school_id === school.school_id,
-              sort: (a, b) => String(b.created_at ?? '').localeCompare(String(a.created_at ?? '')),
-            })
-          );
-        },
-      },
-    ],
-    { enabled: Boolean(school), onResync: () => void loadClasses() }
-  );
+  const teacherNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const t of teachers) {
+      map.set(t.teacher_id, t.teacher_full_name || t.full_name || t.teacher_email || t.teacher_id);
+    }
+    return map;
+  }, [teachers]);
 
   if (!school) return null;
 
-  const wingLimit = school.allowed_count_wing ?? 7;
-  const atLimit = classes.length >= wingLimit;
+  const classLimit = schoolInfo?.total_class ?? school.allowed_count_wing ?? 7;
 
   const openCreate = () => {
-    if (atLimit) {
-      setNotice(
-        `Wing/Class quota reached (${classes.length}/${wingLimit}). Ask SuperAdmin to increase allowed_count_wing.`
-      );
-      return;
-    }
     setEditing(null);
     setForm(EMPTY_CLASS_FORM);
     setModalOpen(true);
   };
 
-  const openEdit = (cls: SchoolClassRecord) => {
+  const openEdit = (cls: TursoSchoolClass) => {
     setEditing(cls);
     setForm({
-      class_name: cls.class_name,
-      wing: cls.wing,
-      level: cls.level,
-      teacher_name: cls.teacher_name,
-      room_no: cls.room_no,
-      capacity: cls.capacity,
+      class_title: cls.class_title,
+      sub_title: cls.sub_title || 'U1',
+      class_teacher_id: cls.class_teacher_id || '',
+      total_students: cls.total_students ?? 0,
+      is_active: cls.is_active === 1,
     });
     setModalOpen(true);
   };
 
   const handleSave = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!form.class_name.trim()) return;
+    if (!form.class_title.trim()) return;
+    setSaving(true);
+    setNotice(null);
 
-    if (editing) {
-      const { data: updated, error } = await updateSchoolRecord<SchoolClassRecord>(
-        'SchoolClasses',
-        editing.class_id,
-        { ...form, class_name: form.class_name.trim() }
-      );
-      if (error) {
-        setNotice(error);
-        return;
+    try {
+      if (editing) {
+        const { data: updated, error } = await updateTursoSchoolClass(editing.class_id, {
+          class_title: form.class_title.trim(),
+          sub_title: form.sub_title.trim() || 'U1',
+          class_teacher_id: form.class_teacher_id || null,
+          total_students: Number(form.total_students) || 0,
+          is_active: form.is_active ? 1 : 0,
+        });
+        if (error) {
+          setNotice(error);
+          return;
+        }
+        if (updated) {
+          setClasses((prev) => prev.map((c) => (c.class_id === updated.class_id ? updated : c)));
+        }
+        setNotice(`Updated class "${form.class_title.trim()}" in Turso SchoolClasses.`);
+      } else {
+        const { data: created, error } = await createTursoSchoolClass({
+          school_id: school.school_id,
+          class_title: form.class_title.trim(),
+          sub_title: form.sub_title.trim() || 'U1',
+          class_teacher_id: form.class_teacher_id || null,
+          total_students: Number(form.total_students) || 0,
+          is_active: form.is_active ? 1 : 0,
+        });
+        if (error) {
+          setNotice(error);
+          return;
+        }
+        if (created) {
+          setClasses((prev) =>
+            prev.some((c) => c.class_id === created.class_id) ? prev : [created, ...prev]
+          );
+        }
+        setNotice(`Added class "${form.class_title.trim()}" to Turso SchoolClasses.`);
       }
-      if (updated) {
-        setClasses((prev) => prev.map((c) => (c.class_id === updated.class_id ? updated : c)));
-      }
-      setNotice(`Updated class "${form.class_name.trim()}".`);
-    } else {
-      const { data: createdList, error } = await createSchoolRecords<SchoolClassRecord>(
-        'SchoolClasses',
-        [
-          {
-            school_id: school.school_id,
-            ...form,
-            class_name: form.class_name.trim(),
-          },
-        ]
-      );
-      if (error) {
-        setNotice(error);
-        return;
-      }
-      const created = createdList[0];
-      if (created) {
-        setClasses((prev) =>
-          prev.some((c) => c.class_id === created.class_id) ? prev : [created, ...prev]
-        );
-      }
-      setNotice(`Added class "${form.class_name.trim()}".`);
+      setModalOpen(false);
+    } finally {
+      setSaving(false);
     }
-    setModalOpen(false);
   };
 
-  const handleDelete = async (cls: SchoolClassRecord) => {
-    const { error } = await deleteSchoolRecord('SchoolClasses', cls.class_id);
+  const handleDelete = async (cls: TursoSchoolClass) => {
+    const { error } = await deleteTursoSchoolClass(cls.class_id);
     if (error) {
       setNotice(error);
       return;
     }
     setClasses((prev) => prev.filter((c) => c.class_id !== cls.class_id));
-    setNotice(`Removed class "${cls.class_name}".`);
+    setNotice(`Removed class "${cls.class_title}".`);
   };
 
   const handleExportCsv = () => {
     if (!school.is_import_export_allowed) return;
     const csv = serializeRowsToCsv(
-      ['class_name', 'wing', 'level', 'teacher_name', 'room_no', 'capacity'],
+      ['class_id', 'class_title', 'sub_title', 'class_teacher_id', 'total_students', 'is_active', 'created_at'],
       classes as unknown as Array<Record<string, unknown>>
     );
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${school.school_title.replace(/\s+/g, '_')}_classes.csv`;
+    a.download = `${school.school_title.replace(/\s+/g, '_')}_Turso_SchoolClasses.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -181,9 +169,10 @@ export default function OurClassInfo() {
     <div className="mx-auto max-w-6xl space-y-6 p-4 sm:p-6">
       <div className="flex flex-col gap-3 border-b border-slate-200 pb-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900">Classes &amp; Wings</h1>
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900">Classes &amp; Units</h1>
           <p className="mt-1 text-sm text-slate-500 tabular-nums">
-            {classes.length} of {wingLimit} allowed class slots used · {school.school_title}
+            {classes.length} of {classLimit} classes · {school.school_title} · Synced with Turso{' '}
+            <code className="font-mono">SchoolClasses</code>
           </p>
         </div>
 
@@ -224,42 +213,56 @@ export default function OurClassInfo() {
       )}
 
       {loading ? (
-        <div className="text-sm text-slate-500">Loading classes...</div>
+        <div className="text-sm text-slate-500">Loading Turso SchoolClasses...</div>
       ) : classes.length === 0 ? (
         <div className="rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center text-sm text-slate-500">
-          No classes added yet. Click &quot;Add Class&quot; to create your first section.
+          No classes added yet. Click &quot;Add Class&quot; to create a class in Turso{' '}
+          <code className="font-mono">SchoolClasses</code>.
         </div>
       ) : (
         <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
           <table className="w-full min-w-[680px] text-left text-sm">
             <thead className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-600">
               <tr>
-                <th className="px-4 py-3">Class Name</th>
-                <th className="px-4 py-3">Wing</th>
-                <th className="px-4 py-3">Level</th>
+                <th className="px-4 py-3">Class Title</th>
+                <th className="px-4 py-3">Sub Title</th>
                 <th className="px-4 py-3">Class Teacher</th>
-                <th className="px-4 py-3">Room</th>
-                <th className="px-4 py-3 text-right">Capacity</th>
+                <th className="px-4 py-3 text-right">Total Students</th>
+                <th className="px-4 py-3">Status</th>
                 <th className="px-4 py-3 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {classes.map((cls) => (
                 <tr key={cls.class_id} className="hover:bg-slate-50/70">
-                  <td className="px-4 py-3 font-semibold text-slate-900">{cls.class_name}</td>
-                  <td className="px-4 py-3 text-slate-700">{cls.wing}</td>
-                  <td className="px-4 py-3 text-slate-600">{cls.level}</td>
-                  <td className="px-4 py-3 text-slate-700">{cls.teacher_name || '—'}</td>
-                  <td className="px-4 py-3 font-mono text-xs text-slate-600">{cls.room_no || '—'}</td>
+                  <td className="px-4 py-3 font-semibold text-slate-900">{cls.class_title}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-slate-700">
+                    {cls.sub_title || 'U1'}
+                  </td>
+                  <td className="px-4 py-3 text-slate-700">
+                    {cls.class_teacher_id
+                      ? teacherNameById.get(cls.class_teacher_id) ||
+                        `${cls.class_teacher_id.slice(0, 8)}...`
+                      : 'Unassigned'}
+                  </td>
                   <td className="px-4 py-3 text-right font-mono tabular-nums text-slate-700">
-                    {cls.capacity}
+                    {cls.total_students}
+                  </td>
+                  <td className="px-4 py-3">
+                    <span
+                      className={`text-xs font-semibold ${
+                        cls.is_active === 1 ? 'text-emerald-700' : 'text-slate-400'
+                      }`}
+                    >
+                      {cls.is_active === 1 ? 'Active' : 'Inactive'}
+                    </span>
                   </td>
                   <td className="px-4 py-3 text-right">
                     <div className="inline-flex items-center gap-1.5">
                       <button
                         type="button"
                         onClick={() => openEdit(cls)}
-                        aria-label={`Edit ${cls.class_name}`}
+                        aria-label={`Edit ${cls.class_title}`}
                         className="rounded p-1.5 text-slate-600 hover:bg-blue-50 hover:text-blue-700 cursor-pointer"
                       >
                         <Edit2 className="h-4 w-4" />
@@ -267,7 +270,7 @@ export default function OurClassInfo() {
                       <button
                         type="button"
                         onClick={() => void handleDelete(cls)}
-                        aria-label={`Delete ${cls.class_name}`}
+                        aria-label={`Delete ${cls.class_title}`}
                         className="rounded p-1.5 text-slate-600 hover:bg-rose-50 hover:text-rose-700 cursor-pointer"
                       >
                         <Trash2 className="h-4 w-4" />
@@ -289,99 +292,85 @@ export default function OurClassInfo() {
         >
           <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-xl">
             <h2 className="text-lg font-bold text-slate-900">
-              {editing ? 'Edit Class' : 'Add New Class'}
+              {editing ? 'Edit Class' : 'Add New Class (Turso SchoolClasses)'}
             </h2>
             <form onSubmit={handleSave} className="mt-4 space-y-3.5">
               <div>
-                <label htmlFor="cls_name" className="mb-1 block text-xs font-semibold text-slate-700">
-                  Class Name *
+                <label htmlFor="cls_title" className="mb-1 block text-xs font-semibold text-slate-700">
+                  Class Title (class_title) *
                 </label>
                 <input
-                  id="cls_name"
+                  id="cls_title"
                   type="text"
                   required
-                  value={form.class_name}
-                  onChange={(e) => setForm({ ...form, class_name: e.target.value })}
-                  placeholder="e.g. Grade 9 - A"
+                  value={form.class_title}
+                  onChange={(e) => setForm({ ...form, class_title: e.target.value })}
+                  placeholder="e.g. Seconday First Year"
                   className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
                 />
               </div>
+
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label htmlFor="cls_wing" className="mb-1 block text-xs font-semibold text-slate-700">
-                    Wing
+                  <label htmlFor="cls_sub" className="mb-1 block text-xs font-semibold text-slate-700">
+                    Sub Title / Unit (sub_title)
                   </label>
                   <input
-                    id="cls_wing"
+                    id="cls_sub"
                     type="text"
-                    value={form.wing}
-                    onChange={(e) => setForm({ ...form, wing: e.target.value })}
+                    value={form.sub_title}
+                    onChange={(e) => setForm({ ...form, sub_title: e.target.value })}
+                    placeholder="U1"
                     className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
                   />
                 </div>
                 <div>
-                  <label htmlFor="cls_level" className="mb-1 block text-xs font-semibold text-slate-700">
-                    Level
-                  </label>
-                  <select
-                    id="cls_level"
-                    value={form.level}
-                    onChange={(e) =>
-                      setForm({
-                        ...form,
-                        level: e.target.value as 'Primary' | 'Secondary' | 'Senior Secondary',
-                      })
-                    }
-                    className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
-                  >
-                    <option value="Primary">Primary</option>
-                    <option value="Secondary">Secondary</option>
-                    <option value="Senior Secondary">Senior Secondary</option>
-                  </select>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label htmlFor="cls_teacher" className="mb-1 block text-xs font-semibold text-slate-700">
-                    Class Teacher
+                  <label htmlFor="cls_students" className="mb-1 block text-xs font-semibold text-slate-700">
+                    Total Students (total_students)
                   </label>
                   <input
-                    id="cls_teacher"
-                    type="text"
-                    value={form.teacher_name}
-                    onChange={(e) => setForm({ ...form, teacher_name: e.target.value })}
-                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
-                  />
-                </div>
-                <div>
-                  <label htmlFor="cls_room" className="mb-1 block text-xs font-semibold text-slate-700">
-                    Room No.
-                  </label>
-                  <input
-                    id="cls_room"
-                    type="text"
-                    value={form.room_no}
-                    onChange={(e) => setForm({ ...form, room_no: e.target.value })}
-                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                    id="cls_students"
+                    type="number"
+                    min={0}
+                    value={form.total_students}
+                    onChange={(e) => setForm({ ...form, total_students: Number(e.target.value) })}
+                    className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono text-sm tabular-nums"
                   />
                 </div>
               </div>
+
               <div>
-                <label htmlFor="cls_capacity" className="mb-1 block text-xs font-semibold text-slate-700">
-                  Student Capacity
+                <label htmlFor="cls_teacher" className="mb-1 block text-xs font-semibold text-slate-700">
+                  Class Teacher (class_teacher_id)
                 </label>
-                <input
-                  id="cls_capacity"
-                  type="number"
-                  min={1}
-                  value={form.capacity}
-                  onChange={(e) => setForm({ ...form, capacity: Number(e.target.value) })}
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono text-sm tabular-nums"
-                />
+                <select
+                  id="cls_teacher"
+                  value={form.class_teacher_id}
+                  onChange={(e) => setForm({ ...form, class_teacher_id: e.target.value })}
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"
+                >
+                  <option value="">Unassigned</option>
+                  {teachers.map((t) => (
+                    <option key={t.teacher_id} value={t.teacher_id}>
+                      {t.teacher_full_name || t.full_name} ({t.teacher_email || t.email})
+                    </option>
+                  ))}
+                </select>
               </div>
+
+              <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={form.is_active}
+                  onChange={(e) => setForm({ ...form, is_active: e.target.checked })}
+                />
+                Class is Active (is_active = 1)
+              </label>
+
               <div className="flex justify-end gap-2 border-t border-slate-100 pt-4">
                 <button
                   type="button"
+                  disabled={saving}
                   onClick={() => setModalOpen(false)}
                   className="h-10 rounded-lg border border-slate-200 px-4 text-sm font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
                 >
@@ -389,9 +378,10 @@ export default function OurClassInfo() {
                 </button>
                 <button
                   type="submit"
-                  className="h-10 rounded-lg bg-indigo-600 px-5 text-sm font-semibold text-white hover:bg-indigo-700 cursor-pointer"
+                  disabled={saving}
+                  className="h-10 rounded-lg bg-indigo-600 px-5 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-50 cursor-pointer"
                 >
-                  {editing ? 'Save Class' : 'Create Class'}
+                  {saving ? 'Saving...' : editing ? 'Save Class' : 'Create Class'}
                 </button>
               </div>
             </form>

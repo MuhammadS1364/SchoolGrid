@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { Calendar, ExternalLink, Globe, Plus, ShieldAlert } from 'lucide-react';
 import { ApiRequestError, apiRequest } from '../../lib/api/platformApi';
+import { useActiveSchool } from '../SchoolContext';
 
 interface ProgrammeItem {
   id: string;
@@ -17,8 +18,9 @@ interface ProgrammeItem {
 }
 
 export default function SchoolProgrammesPage() {
-  const [schoolId, setSchoolId] = useState('sch_greenwood_001');
-  const [schoolSlug, setSchoolSlug] = useState('greenwood-academy');
+  const { school } = useActiveSchool();
+  const [schoolId, setSchoolId] = useState('');
+  const [schoolSlug, setSchoolSlug] = useState('');
   const [programmes, setProgrammes] = useState<ProgrammeItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [authRequired, setAuthRequired] = useState(false);
@@ -32,30 +34,42 @@ export default function SchoolProgrammesPage() {
   const [venue, setVenue] = useState('');
 
   const loadProgrammes = useCallback(async () => {
+    if (!school) return;
     setLoading(true);
     setError(null);
+    let resolvedSlug = '';
     try {
-      const pubSchools = await apiRequest<Array<{ id: string; slug: string }>>('/api/public/schools', {
+      const pubSchools = await apiRequest<Array<{ id: string; name: string; slug: string }>>('/api/public/schools', {
         requireAuth: false,
       });
-      const target = pubSchools[0] ?? { id: 'sch_greenwood_001', slug: 'greenwood-academy' };
-      setSchoolId(target.id);
-      setSchoolSlug(target.slug);
+      const normalizedTitle = school.school_title.trim().toLowerCase();
+      const matched =
+        pubSchools.find((s) => s.id === school.school_id) ??
+        pubSchools.find((s) => s.name.trim().toLowerCase() === normalizedTitle) ??
+        null;
+      const targetId = matched?.id ?? school.school_id;
+      resolvedSlug = matched?.slug ?? '';
+      setSchoolId(targetId);
+      setSchoolSlug(resolvedSlug);
 
-      const list = await apiRequest<ProgrammeItem[]>(`/api/school/${encodeURIComponent(target.id)}/programmes`);
+      const list = await apiRequest<ProgrammeItem[]>(`/api/school/${encodeURIComponent(targetId)}/programmes`);
       setProgrammes(list);
       setAuthRequired(false);
     } catch (err) {
       if (err instanceof ApiRequestError && (err.status === 401 || err.status === 403 || err.status === 404)) {
         setAuthRequired(true);
-        try {
-          const pub = await apiRequest<{ programmes: ProgrammeItem[] }>(
-            `/api/public/schools/${encodeURIComponent(schoolSlug)}`,
-            { requireAuth: false }
-          );
-          setProgrammes(pub.programmes.map((p) => ({ ...p, visibility: 'public', status: 'published' })));
-        } catch {
-          // Ignore fallback
+        if (resolvedSlug) {
+          try {
+            const pub = await apiRequest<{ programmes: ProgrammeItem[] }>(
+              `/api/public/schools/${encodeURIComponent(resolvedSlug)}`,
+              { requireAuth: false }
+            );
+            setProgrammes(pub.programmes.map((p) => ({ ...p, visibility: 'public', status: 'published' })));
+          } catch {
+            setProgrammes([]);
+          }
+        } else {
+          setProgrammes([]);
         }
       } else {
         setError(err instanceof Error ? err.message : 'Unable to load programmes.');
@@ -63,7 +77,7 @@ export default function SchoolProgrammesPage() {
     } finally {
       setLoading(false);
     }
-  }, [schoolSlug]);
+  }, [school]);
 
   useEffect(() => {
     void loadProgrammes();

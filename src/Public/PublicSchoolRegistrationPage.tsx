@@ -2,6 +2,11 @@ import { useMemo, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { CheckCircle2, School } from 'lucide-react';
 import { apiRequest } from '../lib/api/platformApi';
+import SupaBaseClientFunction from '../lib/SupaBaseClient/SupaBaseClientFunction';
+import {
+  buildSchoolAndInfoPayloads,
+  provisionSupabaseAccountAndProfile,
+} from '../lib/auth/userProvisioning';
 
 function slugifyPreview(input: string): string {
   return input
@@ -17,6 +22,7 @@ export default function PublicSchoolRegistrationPage() {
   const [requestedSlug, setRequestedSlug] = useState('');
   const [contactName, setContactName] = useState('');
   const [contactEmail, setContactEmail] = useState('');
+  const [accountPassword, setAccountPassword] = useState('');
   const [contactPhone, setContactPhone] = useState('');
   const [city, setCity] = useState('');
   const [stateName, setStateName] = useState('');
@@ -34,13 +40,54 @@ export default function PublicSchoolRegistrationPage() {
     e.preventDefault();
     setError(null);
 
-    if (!schoolName.trim() || !effectiveSlug || !contactName.trim() || !contactEmail.trim()) {
-      setError('Please complete all required school and administrator fields.');
+    if (
+      !schoolName.trim() ||
+      !effectiveSlug ||
+      !contactName.trim() ||
+      !contactEmail.trim() ||
+      accountPassword.length < 6
+    ) {
+      setError('Please complete all required fields and set a password (min. 6 characters).');
       return;
     }
 
     setSubmitting(true);
     try {
+      // 1. Provision auth.users + school_user_info (role = 'School') + pending OurSchools (is_approved = false)
+      try {
+        const provisioned = await provisionSupabaseAccountAndProfile({
+          email: contactEmail.trim(),
+          password: accountPassword,
+          fullName: contactName.trim(),
+          role: 'School',
+        });
+
+        const { ourSchoolsRow, buildSchoolInfoRow } = buildSchoolAndInfoPayloads({
+          school_title: schoolName.trim(),
+          school_manager: contactName.trim(),
+          is_private: true,
+          loc_state: stateName.trim() || null,
+          loc_city_village: city.trim() || null,
+          user_uuid: provisioned.user_uuid,
+          schoole_gmail: contactEmail.trim(),
+          school_type: 'Senior Secondary',
+          is_approved: false,
+          about_school: notes.trim() || null,
+        });
+
+        const supabase = SupaBaseClientFunction();
+        const { data: created } = await supabase
+          .from('OurSchools')
+          .insert([ourSchoolsRow])
+          .select();
+        const schoolId = (created?.[0] as { school_id?: string } | undefined)?.school_id;
+        if (schoolId) {
+          await supabase.from('SchoolInfo').insert([buildSchoolInfoRow(schoolId)]);
+        }
+      } catch {
+        // Still submit the public onboarding API request below if Supabase RLS restricts anon inserts
+      }
+
       const result = await apiRequest<{ id: string; schoolName: string; requestedSlug: string; status: string }>(
         '/api/public/school-registration',
         {
@@ -203,6 +250,22 @@ export default function PublicSchoolRegistrationPage() {
                     className="w-full rounded-lg border border-slate-200 px-3.5 py-2.5 text-sm text-slate-900 focus:border-indigo-500 focus:outline-none"
                   />
                 </div>
+              </div>
+
+              <div>
+                <label htmlFor="accountPassword" className="mb-1 block text-xs font-semibold text-slate-700">
+                  School Account Password *
+                </label>
+                <input
+                  id="accountPassword"
+                  type="password"
+                  required
+                  minLength={6}
+                  value={accountPassword}
+                  onChange={(e) => setAccountPassword(e.target.value)}
+                  placeholder="Min. 6 characters (for school portal login after SuperAdmin approval)"
+                  className="w-full rounded-lg border border-slate-200 px-3.5 py-2.5 text-sm text-slate-900 focus:border-indigo-500 focus:outline-none"
+                />
               </div>
 
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">

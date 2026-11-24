@@ -1432,6 +1432,153 @@ export function createApiRouter(client: Client, options: ApiRouterOptions = {}):
     }
   );
 
+  // ---- Supabase Auth + school_user_info Provisioning (SuperAdmin / School Admin) ----
+  const provisionSupabaseUserSchema = z.object({
+    email: z.string().trim().email(),
+    password: z.string().min(6).max(128),
+    full_name: z.string().trim().min(1).max(160),
+    user_role: z.enum(['SuperAdmin', 'School', 'Teacher', 'Student']),
+    school_id: z.string().trim().nullable().optional(),
+  });
+
+  router.post(
+    '/supabase/provision-user',
+    requireAuth,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const parsed = provisionSupabaseUserSchema.safeParse(req.body);
+      if (!parsed.success) {
+        sendValidationError(res, parsed);
+        return;
+      }
+
+      const { email, password, full_name, user_role, school_id } = parsed.data;
+      const isPlatformSuperAdmin = Boolean(
+        req.authUser?.platformRoles.includes('super_admin') ||
+          req.authUser?.platformPermissions.includes('*')
+      );
+
+      // Enforce role authorization: only SuperAdmin may create SuperAdmin or School accounts
+      if ((user_role === 'SuperAdmin' || user_role === 'School') && !isPlatformSuperAdmin) {
+        sendError(
+          res,
+          403,
+          'FORBIDDEN_ROLE_PROVISIONING',
+          'Permission denied: only SuperAdmin can create SuperAdmin or School user accounts.'
+        );
+        return;
+      }
+
+      const supabaseUrl = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim().replace(/\/+$/, '');
+      const serviceRoleKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+
+      if (!supabaseUrl || !serviceRoleKey) {
+        sendError(
+          res,
+          503,
+          'SUPABASE_ADMIN_UNCONFIGURED',
+          'Server-side SUPABASE_SERVICE_ROLE_KEY is not configured.'
+        );
+        return;
+      }
+
+      try {
+        // 1. Create real user in Supabase auth.users via Admin REST API
+        const authRes = await fetch(`${supabaseUrl}/auth/v1/admin/users`, {
+          method: 'POST',
+          headers: {
+            apikey: serviceRoleKey,
+            Authorization: `Bearer ${serviceRoleKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            email: email.toLowerCase(),
+            password,
+            email_confirm: true,
+            user_metadata: {
+              role: user_role,
+              full_name,
+              ...(school_id ? { school_id } : {}),
+            },
+          }),
+        });
+
+        const authJson = (await authRes.json().catch(() => ({}))) as {
+          id?: string;
+          msg?: string;
+          message?: string;
+          error_description?: string;
+        };
+
+        if (!authRes.ok || !authJson.id) {
+          sendError(
+            res,
+            authRes.status >= 400 && authRes.status < 500 ? authRes.status : 400,
+            'SUPABASE_AUTH_CREATE_FAILED',
+            authJson.msg || authJson.message || authJson.error_description || 'Could not create auth user.'
+          );
+          return;
+        }
+
+        const newUserUuid = authJson.id;
+
+        // 2. Hash password with scrypt before storing in public.school_user_info.user_password
+        const salt = crypto.randomBytes(16).toString('hex');
+        const derived = crypto.scryptSync(password, salt, 32).toString('hex');
+        const passwordHash = `scrypt$${salt}$${derived}`;
+
+        const infoRes = await fetch(`${supabaseUrl}/rest/v1/school_user_info`, {
+          method: 'POST',
+          headers: {
+            apikey: serviceRoleKey,
+            Authorization: `Bearer ${serviceRoleKey}`,
+            'Content-Type': 'application/json',
+            Prefer: 'return=representation',
+          },
+          body: JSON.stringify([
+            {
+              user_uuid: newUserUuid,
+              full_name,
+              user_password: passwordHash,
+              user_role,
+              is_active: true,
+            },
+          ]),
+        });
+
+        let profileUuid: string | null = null;
+        if (infoRes.ok) {
+          const rows = (await infoRes.json().catch(() => [])) as Array<{ profile_uuid?: string }>;
+          profileUuid = rows?.[0]?.profile_uuid ?? null;
+        }
+
+        await writeAuditLog(client, {
+          scope: school_id ? 'school' : 'platform',
+          schoolId: school_id ?? null,
+          actorUserId: req.authUser!.userId,
+          action: 'supabase_user.provisioned',
+          entityType: 'school_user_info',
+          entityId: newUserUuid,
+          metadata: { email: email.toLowerCase(), user_role, full_name },
+          ipAddress: getClientIp(req),
+          userAgent: getUserAgent(req),
+        });
+
+        res.status(201).json({
+          success: true,
+          data: {
+            user_uuid: newUserUuid,
+            profile_uuid: profileUuid,
+            email: email.toLowerCase(),
+            user_role,
+            full_name,
+          },
+        });
+      } catch {
+        sendError(res, 502, 'SUPABASE_PROVISION_ERROR', 'Failed to communicate with Supabase Auth Admin API.');
+      }
+    }
+  );
+
   router.get(
     '/school/:schoolId/audit-logs',
     requireAuth,
@@ -1449,6 +1596,338 @@ export function createApiRouter(client: Client, options: ApiRouterOptions = {}):
         args: [schoolId],
       });
       res.json({ success: true, data: result.rows });
+    }
+  );
+
+  // =========================================================================
+  // Turso Hybrid Tables: `SchoolInfo` & `SchoolClasses`
+  // =========================================================================
+  const tursoSchoolInfoSchema = z.object({
+    total_class: z.coerce.number().int().min(0).max(500).default(5),
+    primery_class_fee: z.coerce.number().int().min(0).max(500000).default(550),
+    seconday_class_fee: z.coerce.number().int().min(0).max(500000).default(750),
+    insta_id_link: z.string().trim().max(500).nullable().optional(),
+    facebook_link: z.string().trim().max(500).nullable().optional(),
+    youtube_link: z.string().trim().max(500).nullable().optional(),
+    is_computer_lab: z.union([z.boolean(), z.number().int().min(0).max(1)]).optional().default(0),
+    is_library: z.union([z.boolean(), z.number().int().min(0).max(1)]).optional().default(0),
+    about_school: z.string().trim().max(4000).nullable().optional(),
+    school_vission: z.string().trim().max(2000).nullable().optional(),
+    school_mission: z.string().trim().max(2000).nullable().optional(),
+  });
+
+  const tursoSchoolClassCreateSchema = z.object({
+    school_id: z.string().trim().min(1).max(120).nullable().optional(),
+    class_title: z.string().trim().min(1).max(160).default('Seconday First Year'),
+    class_teacher_id: z.string().trim().max(120).nullable().optional(),
+    total_students: z.coerce.number().int().min(0).max(10000).default(0),
+    sub_title: z.string().trim().max(80).default('U1'),
+    is_active: z.union([z.boolean(), z.number().int().min(0).max(1)]).optional().default(1),
+  });
+
+  const tursoSchoolClassUpdateSchema = tursoSchoolClassCreateSchema.partial();
+
+  // Check whether Turso SchoolClasses has a school_id column (supports both user's exact DDL and extended DDL)
+  async function schoolClassesHasSchoolIdColumn(): Promise<boolean> {
+    try {
+      const info = await client.execute(`PRAGMA table_info(\`SchoolClasses\`)`);
+      return info.rows.some((r) => String(r.name).toLowerCase() === 'school_id');
+    } catch {
+      return false;
+    }
+  }
+
+  router.get('/turso/school-info/:schoolId', async (req: Request, res: Response) => {
+    const schoolId = String(req.params.schoolId || '').trim();
+    if (!schoolId) {
+      sendError(res, 400, 'INVALID_SCHOOL_ID', 'schoolId is required.');
+      return;
+    }
+    try {
+      const result = await client.execute({
+        sql: `SELECT * FROM \`SchoolInfo\` WHERE \`school_id\` = ? ORDER BY rowid DESC LIMIT 1`,
+        args: [schoolId],
+      });
+      res.json({ success: true, data: result.rows[0] ?? null });
+    } catch {
+      sendError(res, 500, 'TURSO_SCHOOL_INFO_READ_ERROR', 'Could not read SchoolInfo from Turso.');
+    }
+  });
+
+  router.put(
+    '/turso/school-info/:schoolId',
+    requireAuth,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const schoolId = String(req.params.schoolId || '').trim();
+      if (!schoolId) {
+        sendError(res, 400, 'INVALID_SCHOOL_ID', 'schoolId is required.');
+        return;
+      }
+      const parsed = tursoSchoolInfoSchema.safeParse(req.body);
+      if (!parsed.success) {
+        sendValidationError(res, parsed);
+        return;
+      }
+
+      const d = parsed.data;
+      const computerLabInt = d.is_computer_lab === true || d.is_computer_lab === 1 ? 1 : 0;
+      const libraryInt = d.is_library === true || d.is_library === 1 ? 1 : 0;
+
+      try {
+        const existing = await client.execute({
+          sql: `SELECT \`school_info_id\` FROM \`SchoolInfo\` WHERE \`school_id\` = ? LIMIT 1`,
+          args: [schoolId],
+        });
+
+        if (existing.rows.length > 0) {
+          const infoId = String(existing.rows[0].school_info_id);
+          await client.execute({
+            sql: `UPDATE \`SchoolInfo\`
+                  SET \`total_class\` = ?, \`primery_class_fee\` = ?, \`seconday_class_fee\` = ?,
+                      \`insta_id_link\` = ?, \`facebook_link\` = ?, \`youtube_link\` = ?,
+                      \`is_computer_lab\` = ?, \`is_library\` = ?,
+                      \`about_school\` = ?, \`school_vission\` = ?, \`school_mission\` = ?
+                  WHERE \`school_info_id\` = ?`,
+            args: [
+              d.total_class,
+              d.primery_class_fee,
+              d.seconday_class_fee,
+              d.insta_id_link ?? null,
+              d.facebook_link ?? null,
+              d.youtube_link ?? null,
+              computerLabInt,
+              libraryInt,
+              d.about_school ?? null,
+              d.school_vission ?? null,
+              d.school_mission ?? null,
+              infoId,
+            ],
+          });
+        } else {
+          const newId = crypto.randomUUID();
+          await client.execute({
+            sql: `INSERT INTO \`SchoolInfo\` (
+                    \`school_info_id\`, \`school_id\`, \`total_class\`, \`primery_class_fee\`, \`seconday_class_fee\`,
+                    \`insta_id_link\`, \`facebook_link\`, \`youtube_link\`,
+                    \`is_computer_lab\`, \`is_library\`, \`about_school\`, \`school_vission\`, \`school_mission\`
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            args: [
+              newId,
+              schoolId,
+              d.total_class,
+              d.primery_class_fee,
+              d.seconday_class_fee,
+              d.insta_id_link ?? null,
+              d.facebook_link ?? null,
+              d.youtube_link ?? null,
+              computerLabInt,
+              libraryInt,
+              d.about_school ?? null,
+              d.school_vission ?? null,
+              d.school_mission ?? null,
+            ],
+          });
+        }
+
+        const saved = await client.execute({
+          sql: `SELECT * FROM \`SchoolInfo\` WHERE \`school_id\` = ? ORDER BY rowid DESC LIMIT 1`,
+          args: [schoolId],
+        });
+        res.json({ success: true, data: saved.rows[0] ?? null });
+      } catch {
+        sendError(res, 500, 'TURSO_SCHOOL_INFO_SAVE_ERROR', 'Could not save SchoolInfo in Turso.');
+      }
+    }
+  );
+
+  router.get('/turso/school-classes', async (req: Request, res: Response) => {
+    const schoolId = typeof req.query.schoolId === 'string' ? req.query.schoolId.trim() : '';
+    const classId = typeof req.query.classId === 'string' ? req.query.classId.trim() : '';
+    const teacherIdsRaw =
+      typeof req.query.teacherIds === 'string' ? req.query.teacherIds.trim() : '';
+    const teacherIds = teacherIdsRaw
+      ? teacherIdsRaw
+          .split(',')
+          .map((id) => id.trim())
+          .filter(Boolean)
+          .slice(0, 100)
+      : [];
+
+    try {
+      if (classId) {
+        const result = await client.execute({
+          sql: `SELECT * FROM \`SchoolClasses\` WHERE \`class_id\` = ? LIMIT 1`,
+          args: [classId],
+        });
+        res.json({ success: true, data: result.rows });
+        return;
+      }
+
+      const hasSchoolId = await schoolClassesHasSchoolIdColumn();
+      const conditions: string[] = [];
+      const args: Array<string | number> = [];
+
+      if (hasSchoolId && schoolId) {
+        conditions.push(`\`school_id\` = ?`);
+        args.push(schoolId);
+      }
+      if (teacherIds.length > 0) {
+        const placeholders = teacherIds.map(() => '?').join(', ');
+        conditions.push(`\`class_teacher_id\` IN (${placeholders})`);
+        args.push(...teacherIds);
+      }
+
+      const whereClause =
+        conditions.length > 0
+          ? `WHERE ${hasSchoolId && schoolId && teacherIds.length > 0 ? `(${conditions.join(' OR ')})` : conditions.join(' AND ')}`
+          : '';
+
+      const result = await client.execute({
+        sql: `SELECT * FROM \`SchoolClasses\` ${whereClause} ORDER BY rowid DESC LIMIT 200`,
+        args,
+      });
+      res.json({ success: true, data: result.rows });
+    } catch {
+      sendError(res, 500, 'TURSO_CLASSES_READ_ERROR', 'Could not load SchoolClasses from Turso.');
+    }
+  });
+
+  router.post(
+    '/turso/school-classes',
+    requireAuth,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const parsed = tursoSchoolClassCreateSchema.safeParse(req.body);
+      if (!parsed.success) {
+        sendValidationError(res, parsed);
+        return;
+      }
+      const d = parsed.data;
+      const classId = crypto.randomUUID();
+      const activeInt = d.is_active === false || d.is_active === 0 ? 0 : 1;
+
+      try {
+        const hasSchoolId = await schoolClassesHasSchoolIdColumn();
+        if (hasSchoolId) {
+          await client.execute({
+            sql: `INSERT INTO \`SchoolClasses\` (
+                    \`class_id\`, \`school_id\`, \`class_title\`, \`class_teacher_id\`, \`total_students\`, \`sub_title\`, \`is_active\`
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            args: [
+              classId,
+              d.school_id ?? null,
+              d.class_title,
+              d.class_teacher_id ?? null,
+              d.total_students,
+              d.sub_title,
+              activeInt,
+            ],
+          });
+        } else {
+          await client.execute({
+            sql: `INSERT INTO \`SchoolClasses\` (
+                    \`class_id\`, \`class_title\`, \`class_teacher_id\`, \`total_students\`, \`sub_title\`, \`is_active\`
+                  ) VALUES (?, ?, ?, ?, ?, ?)`,
+            args: [
+              classId,
+              d.class_title,
+              d.class_teacher_id ?? null,
+              d.total_students,
+              d.sub_title,
+              activeInt,
+            ],
+          });
+        }
+
+        const saved = await client.execute({
+          sql: `SELECT * FROM \`SchoolClasses\` WHERE \`class_id\` = ? LIMIT 1`,
+          args: [classId],
+        });
+        res.status(201).json({ success: true, data: saved.rows[0] ?? null });
+      } catch {
+        sendError(res, 500, 'TURSO_CLASSES_CREATE_ERROR', 'Could not create class in Turso.');
+      }
+    }
+  );
+
+  router.patch(
+    '/turso/school-classes/:classId',
+    requireAuth,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const classId = String(req.params.classId || '').trim();
+      if (!classId) {
+        sendError(res, 400, 'INVALID_CLASS_ID', 'classId is required.');
+        return;
+      }
+      const parsed = tursoSchoolClassUpdateSchema.safeParse(req.body);
+      if (!parsed.success) {
+        sendValidationError(res, parsed);
+        return;
+      }
+      const d = parsed.data;
+      const sets: string[] = [];
+      const args: Array<string | number | null> = [];
+
+      if (d.class_title !== undefined) {
+        sets.push(`\`class_title\` = ?`);
+        args.push(d.class_title);
+      }
+      if (d.class_teacher_id !== undefined) {
+        sets.push(`\`class_teacher_id\` = ?`);
+        args.push(d.class_teacher_id ?? null);
+      }
+      if (d.total_students !== undefined) {
+        sets.push(`\`total_students\` = ?`);
+        args.push(d.total_students);
+      }
+      if (d.sub_title !== undefined) {
+        sets.push(`\`sub_title\` = ?`);
+        args.push(d.sub_title);
+      }
+      if (d.is_active !== undefined) {
+        sets.push(`\`is_active\` = ?`);
+        args.push(d.is_active === false || d.is_active === 0 ? 0 : 1);
+      }
+
+      if (sets.length === 0) {
+        sendError(res, 400, 'EMPTY_UPDATE', 'No fields provided to update.');
+        return;
+      }
+
+      args.push(classId);
+      try {
+        await client.execute({
+          sql: `UPDATE \`SchoolClasses\` SET ${sets.join(', ')} WHERE \`class_id\` = ?`,
+          args,
+        });
+        const updated = await client.execute({
+          sql: `SELECT * FROM \`SchoolClasses\` WHERE \`class_id\` = ? LIMIT 1`,
+          args: [classId],
+        });
+        res.json({ success: true, data: updated.rows[0] ?? null });
+      } catch {
+        sendError(res, 500, 'TURSO_CLASSES_UPDATE_ERROR', 'Could not update class in Turso.');
+      }
+    }
+  );
+
+  router.delete(
+    '/turso/school-classes/:classId',
+    requireAuth,
+    async (req: AuthenticatedRequest, res: Response) => {
+      const classId = String(req.params.classId || '').trim();
+      if (!classId) {
+        sendError(res, 400, 'INVALID_CLASS_ID', 'classId is required.');
+        return;
+      }
+      try {
+        await client.execute({
+          sql: `DELETE FROM \`SchoolClasses\` WHERE \`class_id\` = ?`,
+          args: [classId],
+        });
+        res.json({ success: true, data: { class_id: classId } });
+      } catch {
+        sendError(res, 500, 'TURSO_CLASSES_DELETE_ERROR', 'Could not delete class in Turso.');
+      }
     }
   );
 

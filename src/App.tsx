@@ -76,7 +76,8 @@ export default function App() {
           <Route path="features" element={<SchoolFeaturesHub />} />
         </Route>
 
-        {/* Teacher & Student Portals */}
+        {/* Wing, Teacher & Student Portals */}
+        <Route path="/wing-dashboard" element={<RolePortalPage role="Wing" />} />
         <Route path="/teacher-dashboard" element={<RolePortalPage role="Teacher" />} />
         <Route path="/student-dashboard" element={<RolePortalPage role="Student" />} />
 
